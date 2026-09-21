@@ -27,12 +27,22 @@ class DHIS2Client:
         except requests.RequestException:
             return False
 
+    @staticmethod
+    def _raise_detailed(r: requests.Response):
+        """Raise with DHIS2's own error message included, not just a bare status code."""
+        if not r.ok:
+            try:
+                detail = r.json().get("message", r.text)
+            except ValueError:
+                detail = r.text
+            raise RuntimeError(f"DHIS2 request failed ({r.status_code}): {detail}")
+
     def get_org_units(self, level: int = 4) -> pd.DataFrame:
         """Pull facility-level org units (default level 4 = facility in most DHIS2 hierarchies)."""
         params = {"filter": f"level:eq:{level}", "fields": "id,name,parent[name]", "paging": "false"}
         r = requests.get(f"{self.base_url}/api/organisationUnits.json", params=params,
                           auth=self.auth, timeout=30)
-        r.raise_for_status()
+        self._raise_detailed(r)
         data = r.json()["organisationUnits"]
         return pd.DataFrame(data)
 
@@ -41,7 +51,7 @@ class DHIS2Client:
         params = {"fields": "id,name,periodType", "paging": "false"}
         r = requests.get(f"{self.base_url}/api/dataSets.json", params=params,
                           auth=self.auth, timeout=30)
-        r.raise_for_status()
+        self._raise_detailed(r)
         return pd.DataFrame(r.json().get("dataSets", []))
 
     def get_dataset_elements(self, dataset_id: str) -> pd.DataFrame:
@@ -49,10 +59,11 @@ class DHIS2Client:
         params = {"fields": "dataSetElements[dataElement[id,name]]"}
         r = requests.get(f"{self.base_url}/api/dataSets/{dataset_id}.json", params=params,
                           auth=self.auth, timeout=30)
-        r.raise_for_status()
+        self._raise_detailed(r)
         rows = [{"id": d["dataElement"]["id"], "name": d["dataElement"]["name"]}
                 for d in r.json().get("dataSetElements", [])]
         return pd.DataFrame(rows)
+
 
     def get_analytics(self, data_elements: list[str], org_unit: str, period: str) -> pd.DataFrame:
         """
@@ -69,7 +80,7 @@ class DHIS2Client:
         }
         r = requests.get(f"{self.base_url}/api/analytics.json", params=params,
                           auth=self.auth, timeout=60)
-        r.raise_for_status()
+        self._raise_detailed(r)
         payload = r.json()
         headers = [h["column"] for h in payload["headers"]]
         df = pd.DataFrame(payload["rows"], columns=headers)

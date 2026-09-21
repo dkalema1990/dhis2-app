@@ -1,5 +1,6 @@
 import streamlit as st
 import pandas as pd
+import requests
 import auth
 from dhis2_client import get_mock_facility_data, generate_periods
 
@@ -23,9 +24,12 @@ else:
         # --- 1) Dataset dropdown ---------------------------------------
         if "dhis2_datasets" not in st.session_state:
             if st.button("🔄 Load datasets from DHIS2"):
-                with st.spinner("Fetching datasets..."):
-                    st.session_state["dhis2_datasets"] = client.get_datasets()
-                st.rerun()
+                try:
+                    with st.spinner("Fetching datasets..."):
+                        st.session_state["dhis2_datasets"] = client.get_datasets()
+                    st.rerun()
+                except RuntimeError as e:
+                    st.error(f"Couldn't load datasets from DHIS2: {e}")
         if "dhis2_datasets" in st.session_state:
             ds_df = st.session_state["dhis2_datasets"]
             if ds_df.empty:
@@ -40,8 +44,12 @@ else:
                 # --- 2) Data element dropdown, scoped to the chosen dataset ---
                 de_cache_key = f"dhis2_elements_{dataset_id}"
                 if de_cache_key not in st.session_state:
-                    with st.spinner("Fetching data elements for this dataset..."):
-                        st.session_state[de_cache_key] = client.get_dataset_elements(dataset_id)
+                    try:
+                        with st.spinner("Fetching data elements for this dataset..."):
+                            st.session_state[de_cache_key] = client.get_dataset_elements(dataset_id)
+                    except RuntimeError as e:
+                        st.error(f"Couldn't load data elements for this dataset: {e}")
+                        st.stop()
                 de_df = st.session_state[de_cache_key]
                 de_names = st.multiselect("Data elements", de_df["name"].tolist(),
                                             default=de_df["name"].tolist()[:5])
@@ -55,11 +63,50 @@ else:
                 )
                 period_code = dict(period_options)[period_label]
 
-                ou_id = st.text_input("Org unit / group UID (e.g. a district group)")
+                # --- 4) Org unit dropdown, multi-select ------------------------
+                ou_level = st.number_input("Org unit level (1=country, 4=typical facility level)",
+                                             min_value=1, max_value=8, value=4, step=1)
+                ou_cache_key = f"dhis2_orgunits_{ou_level}"
+                if ou_cache_key not in st.session_state:
+                    if st.button("🔄 Load org units at this level"):
+                        try:
+                            with st.spinner("Fetching org units..."):
+                                st.session_state[ou_cache_key] = client.get_org_units(level=int(ou_level))
+                            st.rerun()
+                        except RuntimeError as e:
+                            st.error(f"Couldn't load org units: {e}")
+                if ou_cache_key in st.session_state:
+                    ou_df = st.session_state[ou_cache_key]
+                    if ou_df.empty:
+                        st.warning("No org units returned at this level — check the level number and your "
+                                    "DHIS2 permissions.")
+                        ou_ids = []
+                    else:
+                        ou_df = ou_df.copy()
+                        ou_df["display"] = ou_df.apply(
+                            lambda r: f"{r['name']} ({r['parent']['name']})" if isinstance(r.get("parent"), dict)
+                            else r["name"], axis=1)
+                        ou_display_sel = st.multiselect(
+                            "Org units (select one or more)", ou_df["display"].tolist(),
+                            default=ou_df["display"].tolist()[:10]
+                        )
+                        ou_ids = ou_df[ou_df["display"].isin(ou_display_sel)]["id"].tolist()
+                else:
+                    ou_ids = []
+                    st.caption("Click \"Load org units at this level\" above to pick facilities.")
+
                 target_csv = st.file_uploader("Upload targets CSV (columns: facility, data_element, target)")
 
-                if st.button("Pull from DHIS2", type="primary") and de_ids and ou_id:
-                    raw = client.get_analytics(de_ids, ou_id, period_code)
+                if st.button("Pull from DHIS2", type="primary") and de_ids and ou_ids:
+                    try:
+                        with st.spinner("Pulling analytics from DHIS2..."):
+                            raw = client.get_analytics(de_ids, ";".join(ou_ids), period_code)
+                    except RuntimeError as e:
+                        st.error(str(e))
+                        st.info("Common fixes: double-check the org unit UID is correct and that your "
+                                  "DHIS2 login has access to it, and confirm analytics tables have been "
+                                  "generated for this period on your DHIS2 instance.")
+                        st.stop()
                     if target_csv is not None:
                         targets = pd.read_csv(target_csv)
                         df_pulled = raw.merge(targets, on=["facility", "data_element"], how="left")
@@ -73,9 +120,10 @@ else:
                     st.session_state["live_df"] = df_pulled
                     st.session_state["period"] = period_code
 
-                if st.button("↻ Refresh dataset/data element lists"):
+                if st.button("↻ Refresh dataset/data element/org unit lists"):
                     for k in list(st.session_state.keys()):
-                        if k == "dhis2_datasets" or k.startswith("dhis2_elements_"):
+                        if (k == "dhis2_datasets" or k.startswith("dhis2_elements_")
+                                or k.startswith("dhis2_orgunits_")):
                             del st.session_state[k]
                     st.rerun()
     df = st.session_state.get("live_df", get_mock_facility_data(st.session_state.get("period", "2026Q3")))
