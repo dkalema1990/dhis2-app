@@ -102,8 +102,13 @@ def _spreadsheet():
     return _client().open_by_key(st.secrets["gsheet_id"])
 
 
+@st.cache_resource(show_spinner=False)
 @_wrap_gspread_errors
 def _get_or_create_ws(name: str):
+    """Cached as a resource: the worksheet lookup + header check only happens
+    once per running app process, not on every Streamlit rerun. This is the
+    single biggest fix for hitting Google Sheets' read-quota — without this,
+    every click anywhere in the app re-reads every worksheet's header row."""
     ss = _spreadsheet()
     try:
         ws = ss.worksheet(name)
@@ -117,16 +122,22 @@ def _get_or_create_ws(name: str):
 
 
 def init_sheets():
-    """Create all worksheets if missing and seed a default admin user."""
+    """Create all worksheets if missing and seed a default admin user.
+    Guarded to run at most once per Streamlit session — this used to run on
+    every single rerun of the login page (every failed login, every widget
+    interaction), which alone was enough to exhaust the read quota."""
+    if st.session_state.get("_sheets_initialized"):
+        return
     for name in SHEET_COLUMNS:
         _get_or_create_ws(name)
     _seed_default_admin()
+    st.session_state["_sheets_initialized"] = True
 
 
 def _seed_default_admin():
     ws = _get_or_create_ws("Users")
-    if not ws.get_all_records():
-        ws.append_row(["admin", hash_password("admin123"), "admin", "Default Admin"])
+    if not _wrap_gspread_errors(ws.get_all_records)():
+        _wrap_gspread_errors(ws.append_row)(["admin", hash_password("admin123"), "admin", "Default Admin"])
 
 
 def hash_password(pw: str) -> str:
@@ -141,11 +152,15 @@ def append_record(sheet: str, record: dict):
     ws = _get_or_create_ws(sheet)
     cols = SHEET_COLUMNS[sheet]
     _wrap_gspread_errors(ws.append_row)([str(record.get(c, "")) for c in cols])
+    get_all.clear()  # this sheet changed — next read should be fresh, not the cached one
 
 
+@st.cache_data(ttl=30, show_spinner=False)
 def get_all(sheet: str) -> pd.DataFrame:
     """Returns all rows plus a `_row` column = the actual Google Sheet row number,
-    needed for editing/deleting a specific record."""
+    needed for editing/deleting a specific record. Cached for 30s: this is the
+    other big read-quota fix — every dashboard render, tab switch, or filter
+    change used to re-read the sheet from scratch."""
     ws = _get_or_create_ws(sheet)
     records = _wrap_gspread_errors(ws.get_all_records)()
     df = pd.DataFrame(records)
@@ -160,11 +175,13 @@ def update_record(sheet: str, row: int, record: dict):
     last_col_letter = chr(ord("A") + len(cols) - 1)  # fine while columns <= 26
     _wrap_gspread_errors(ws.update)(f"A{row}:{last_col_letter}{row}",
                                       [[str(record.get(c, "")) for c in cols]])
+    get_all.clear()
 
 
 def delete_record(sheet: str, row: int):
     ws = _get_or_create_ws(sheet)
     _wrap_gspread_errors(ws.delete_rows)(row)
+    get_all.clear()
 
 
 # Thin convenience wrappers so the form pages read naturally
