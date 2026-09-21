@@ -12,14 +12,25 @@ st.title("📊 DHIS2 Facility Performance & Action Tracker")
 # ---------------------------------------------------------------------
 if "user" not in st.session_state:
     if gsheets.is_configured():
-        gsheets.init_sheets()  # creates worksheets + seeds default admin if first run
+        try:
+            gsheets.init_sheets()  # creates worksheets + seeds default admin if first run
+        except RuntimeError as e:
+            st.error(f"Couldn't connect to your Google Sheet: {e}")
+            st.info("Double-check: the sheet is shared with your service account's `client_email` as "
+                      "**Editor**, `gsheet_id` in your secrets matches the sheet's URL exactly, and the "
+                      "Sheets + Drive APIs are enabled on the same Google Cloud project as the service account.")
+            st.stop()
         st.subheader("🔐 Log in")
         with st.form("login"):
             u = st.text_input("Username")
             p = st.text_input("Password", type="password")
             go = st.form_submit_button("Log in", type="primary")
         if go:
-            user = auth.verify_login(u, p)
+            try:
+                user = auth.verify_login(u, p)
+            except RuntimeError as e:
+                st.error(f"Couldn't reach Google Sheets to check your login: {e}")
+                st.stop()
             if user:
                 st.session_state["user"] = user
                 st.rerun()

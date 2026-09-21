@@ -32,6 +32,7 @@ the right header row the first time the app runs.
 """
 
 import hashlib
+import functools
 from datetime import datetime
 
 import pandas as pd
@@ -59,6 +60,33 @@ def is_configured() -> bool:
         return False
 
 
+def _friendly_gspread_error(e) -> str:
+    """Turn a gspread.exceptions.APIError into a readable message with Google's
+    own status + reason, instead of a bare traceback."""
+    try:
+        body = e.response.json()
+        err = body.get("error", {})
+        status = err.get("status", e.response.status_code)
+        message = err.get("message", e.response.text)
+        return f"Google Sheets API error ({status}): {message}"
+    except Exception:
+        return f"Google Sheets API error: {e}"
+
+
+def _wrap_gspread_errors(fn):
+    """Decorator: catch gspread.exceptions.APIError and re-raise as a plain
+    RuntimeError with a readable message, so the app can show it instead of
+    crashing with a redacted traceback."""
+    @functools.wraps(fn)
+    def wrapper(*args, **kwargs):
+        import gspread
+        try:
+            return fn(*args, **kwargs)
+        except gspread.exceptions.APIError as e:
+            raise RuntimeError(_friendly_gspread_error(e)) from e
+    return wrapper
+
+
 @st.cache_resource(show_spinner=False)
 def _client():
     import gspread
@@ -69,10 +97,12 @@ def _client():
     return gspread.authorize(creds)
 
 
+@_wrap_gspread_errors
 def _spreadsheet():
     return _client().open_by_key(st.secrets["gsheet_id"])
 
 
+@_wrap_gspread_errors
 def _get_or_create_ws(name: str):
     ss = _spreadsheet()
     try:
@@ -110,14 +140,14 @@ def append_record(sheet: str, record: dict):
     record = {**record, "timestamp": datetime.now().isoformat(timespec="seconds")}
     ws = _get_or_create_ws(sheet)
     cols = SHEET_COLUMNS[sheet]
-    ws.append_row([str(record.get(c, "")) for c in cols])
+    _wrap_gspread_errors(ws.append_row)([str(record.get(c, "")) for c in cols])
 
 
 def get_all(sheet: str) -> pd.DataFrame:
     """Returns all rows plus a `_row` column = the actual Google Sheet row number,
     needed for editing/deleting a specific record."""
     ws = _get_or_create_ws(sheet)
-    records = ws.get_all_records()
+    records = _wrap_gspread_errors(ws.get_all_records)()
     df = pd.DataFrame(records)
     if not df.empty:
         df.insert(0, "_row", range(2, len(df) + 2))
@@ -128,11 +158,13 @@ def update_record(sheet: str, row: int, record: dict):
     ws = _get_or_create_ws(sheet)
     cols = SHEET_COLUMNS[sheet]
     last_col_letter = chr(ord("A") + len(cols) - 1)  # fine while columns <= 26
-    ws.update(f"A{row}:{last_col_letter}{row}", [[str(record.get(c, "")) for c in cols]])
+    _wrap_gspread_errors(ws.update)(f"A{row}:{last_col_letter}{row}",
+                                      [[str(record.get(c, "")) for c in cols]])
 
 
 def delete_record(sheet: str, row: int):
-    _get_or_create_ws(sheet).delete_rows(row)
+    ws = _get_or_create_ws(sheet)
+    _wrap_gspread_errors(ws.delete_rows)(row)
 
 
 # Thin convenience wrappers so the form pages read naturally
