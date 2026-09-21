@@ -1,7 +1,7 @@
 import streamlit as st
 import pandas as pd
 import auth
-from dhis2_client import get_mock_facility_data
+from dhis2_client import get_mock_facility_data, generate_periods
 
 st.set_page_config(page_title="Facility Dashboard", page_icon="🏥", layout="wide")
 auth.require_login()
@@ -19,23 +19,65 @@ if st.session_state.get("use_mock", True) or "dhis2_client" not in st.session_st
 else:
     with st.expander("⚙️ Real DHIS2 pull settings", expanded=True):
         client = st.session_state["dhis2_client"]
-        c1, c2 = st.columns(2)
-        de_ids = c1.text_input("Data element UIDs (comma-separated)")
-        ou_id = c2.text_input("Org unit / group UID (e.g. a district group)")
-        target_csv = st.file_uploader("Upload targets CSV (columns: facility, data_element, target)")
-        if st.button("Pull from DHIS2") and de_ids and ou_id:
-            raw = client.get_analytics(de_ids.split(","), ou_id, st.session_state["period"])
-            if target_csv is not None:
-                targets = pd.read_csv(target_csv)
-                df = raw.merge(targets, on=["facility", "data_element"], how="left")
-                df = df.rename(columns={"value": "actual"})
-                df["achievement_pct"] = (df["actual"] / df["target"] * 100).round(1)
+
+        # --- 1) Dataset dropdown ---------------------------------------
+        if "dhis2_datasets" not in st.session_state:
+            if st.button("🔄 Load datasets from DHIS2"):
+                with st.spinner("Fetching datasets..."):
+                    st.session_state["dhis2_datasets"] = client.get_datasets()
+                st.rerun()
+        if "dhis2_datasets" in st.session_state:
+            ds_df = st.session_state["dhis2_datasets"]
+            if ds_df.empty:
+                st.warning("No datasets returned — check your DHIS2 permissions.")
             else:
-                st.warning("Upload a targets CSV to compute achievement %.")
-                df = raw.rename(columns={"value": "actual"})
-                df["target"] = None
-                df["achievement_pct"] = None
-            st.session_state["live_df"] = df
+                ds_names = ds_df["name"].tolist()
+                ds_name = st.selectbox("Dataset", ds_names, key="ds_name")
+                ds_row = ds_df[ds_df["name"] == ds_name].iloc[0]
+                dataset_id = ds_row["id"]
+                period_type = ds_row.get("periodType", "Monthly")
+
+                # --- 2) Data element dropdown, scoped to the chosen dataset ---
+                de_cache_key = f"dhis2_elements_{dataset_id}"
+                if de_cache_key not in st.session_state:
+                    with st.spinner("Fetching data elements for this dataset..."):
+                        st.session_state[de_cache_key] = client.get_dataset_elements(dataset_id)
+                de_df = st.session_state[de_cache_key]
+                de_names = st.multiselect("Data elements", de_df["name"].tolist(),
+                                            default=de_df["name"].tolist()[:5])
+                de_ids = de_df[de_df["name"].isin(de_names)]["id"].tolist()
+
+                # --- 3) Reporting period dropdown, generated from the dataset's periodType ---
+                period_options = generate_periods(period_type, count=12)
+                period_label = st.selectbox(
+                    "Reporting period", [p[0] for p in period_options],
+                    help=f"Periods generated for this dataset's period type: {period_type}"
+                )
+                period_code = dict(period_options)[period_label]
+
+                ou_id = st.text_input("Org unit / group UID (e.g. a district group)")
+                target_csv = st.file_uploader("Upload targets CSV (columns: facility, data_element, target)")
+
+                if st.button("Pull from DHIS2", type="primary") and de_ids and ou_id:
+                    raw = client.get_analytics(de_ids, ou_id, period_code)
+                    if target_csv is not None:
+                        targets = pd.read_csv(target_csv)
+                        df_pulled = raw.merge(targets, on=["facility", "data_element"], how="left")
+                        df_pulled = df_pulled.rename(columns={"value": "actual"})
+                        df_pulled["achievement_pct"] = (df_pulled["actual"] / df_pulled["target"] * 100).round(1)
+                    else:
+                        st.warning("Upload a targets CSV to compute achievement %.")
+                        df_pulled = raw.rename(columns={"value": "actual"})
+                        df_pulled["target"] = None
+                        df_pulled["achievement_pct"] = None
+                    st.session_state["live_df"] = df_pulled
+                    st.session_state["period"] = period_code
+
+                if st.button("↻ Refresh dataset/data element lists"):
+                    for k in list(st.session_state.keys()):
+                        if k == "dhis2_datasets" or k.startswith("dhis2_elements_"):
+                            del st.session_state[k]
+                    st.rerun()
     df = st.session_state.get("live_df", get_mock_facility_data(st.session_state.get("period", "2026Q3")))
 
 # ---------------------------------------------------------------------

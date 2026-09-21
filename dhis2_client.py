@@ -36,6 +36,24 @@ class DHIS2Client:
         data = r.json()["organisationUnits"]
         return pd.DataFrame(data)
 
+    def get_datasets(self) -> pd.DataFrame:
+        """List all datasets (id, name, periodType) for the dataset dropdown."""
+        params = {"fields": "id,name,periodType", "paging": "false"}
+        r = requests.get(f"{self.base_url}/api/dataSets.json", params=params,
+                          auth=self.auth, timeout=30)
+        r.raise_for_status()
+        return pd.DataFrame(r.json().get("dataSets", []))
+
+    def get_dataset_elements(self, dataset_id: str) -> pd.DataFrame:
+        """List the data elements that belong to a given dataset, for the data element dropdown."""
+        params = {"fields": "dataSetElements[dataElement[id,name]]"}
+        r = requests.get(f"{self.base_url}/api/dataSets/{dataset_id}.json", params=params,
+                          auth=self.auth, timeout=30)
+        r.raise_for_status()
+        rows = [{"id": d["dataElement"]["id"], "name": d["dataElement"]["name"]}
+                for d in r.json().get("dataSetElements", [])]
+        return pd.DataFrame(rows)
+
     def get_analytics(self, data_elements: list[str], org_unit: str, period: str) -> pd.DataFrame:
         """
         data_elements: list of DHIS2 data element (or indicator) UIDs
@@ -83,6 +101,55 @@ class DHIS2Client:
         r = requests.post(f"{self.base_url}/api/events", json=payload, auth=self.auth, timeout=30)
         r.raise_for_status()
         return r.json()
+
+
+def generate_periods(period_type: str, count: int = 12) -> list[tuple[str, str]]:
+    """
+    DHIS2 has no 'list periods' API — periods are generated from the
+    dataset's periodType. Returns the most recent `count` periods as
+    (display_label, dhis2_period_code) tuples, newest first, so the UI
+    can offer a clean dropdown instead of asking users to type period codes.
+    """
+    from datetime import date
+    today = date.today()
+    pt = (period_type or "").lower()
+    periods = []
+
+    if pt == "monthly":
+        y, m = today.year, today.month
+        for i in range(count):
+            mm, yy = m - i, y
+            while mm <= 0:
+                mm += 12
+                yy -= 1
+            periods.append((f"{yy}-{mm:02d}", f"{yy}{mm:02d}"))
+    elif pt == "quarterly":
+        y, q = today.year, (today.month - 1) // 3 + 1
+        for i in range(count):
+            qq, yy = q - i, y
+            while qq <= 0:
+                qq += 4
+                yy -= 1
+            periods.append((f"{yy} Q{qq}", f"{yy}Q{qq}"))
+    elif pt in ("weekly",):
+        iso_year, iso_week, _ = today.isocalendar()
+        for i in range(count):
+            ww, yy = iso_week - i, iso_year
+            while ww <= 0:
+                ww += 52
+                yy -= 1
+            periods.append((f"{yy} Week {ww}", f"{yy}W{ww}"))
+    elif pt.startswith("financialjuly") or pt.startswith("financial"):
+        fy = today.year if today.month >= 7 else today.year - 1
+        for i in range(count):
+            yy = fy - i
+            periods.append((f"FY {yy}-{yy + 1}", f"{yy}July"))
+    else:  # "yearly" and any unrecognized type fall back to calendar years
+        for i in range(count):
+            yy = today.year - i
+            periods.append((str(yy), str(yy)))
+
+    return periods
 
 
 # ---------------------------------------------------------------------
