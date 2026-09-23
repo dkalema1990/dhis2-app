@@ -76,8 +76,6 @@ with st.form("dhis2_conn"):
     base_url = col1.text_input("DHIS2 Base URL", placeholder="https://play.dhis2.org/demo")
     username = col2.text_input("Username")
     password = col3.text_input("Password", type="password")
-    period = st.text_input("Period (DHIS2 format)", value="2026Q3",
-                            help="e.g. 2026Q3, THIS_YEAR, 202608")
     connect = st.form_submit_button("Connect & Pull Data", type="primary")
 
 if connect:
@@ -85,9 +83,9 @@ if connect:
         client = DHIS2Client(base_url, username, password)
         if client.test_connection():
             st.session_state["dhis2_client"] = client
-            st.session_state["period"] = period
             st.session_state["use_mock"] = False
-            st.success("Connected to DHIS2. Go to the Facility Dashboard page to view data.")
+            st.success("Connected to DHIS2 — taking you to the Facility Dashboard...")
+            st.switch_page("pages/1_🏥_Facility_Dashboard.py")
         else:
             st.error("Could not authenticate against that DHIS2 instance. Check URL/credentials.")
     else:
@@ -99,6 +97,6 @@ if st.button("Load demo dataset"):
     st.session_state["use_mock"] = True
     st.session_state["period"] = st.session_state.get("period", "2026Q3")
     st.session_state["mock_df"] = get_mock_facility_data(st.session_state["period"])
-    st.success("Demo data loaded. Open **Facility Dashboard** in the sidebar.")
+    st.switch_page("pages/1_🏥_Facility_Dashboard.py")
 
 st.caption(f"Data elements tracked in this demo: {', '.join(DATA_ELEMENTS)}")
