@@ -212,6 +212,18 @@ def badge(pct):
     return f"🟢 {pct}%"
 
 
+def _pct_cell_style(val):
+    """Background/text color for a single achievement % cell, same red/yellow/green
+    bands as the facility-level badge, so the detail table reads at a glance."""
+    if pd.isna(val):
+        return "background-color: #f0f0f0; color: #888888;"
+    if val < RED:
+        return "background-color: #fdecea; color: #b3261e; font-weight: 600;"
+    if val < YELLOW:
+        return "background-color: #fff8e1; color: #8a6d00; font-weight: 600;"
+    return "background-color: #e6f4ea; color: #1e7e34; font-weight: 600;"
+
+
 def recommended_action(pct):
     """Auto-suggest a default follow-up based on achievement band.
     Still lets the user pick any of the three — this just pre-highlights one."""
@@ -238,18 +250,20 @@ for _, row in summary.iterrows():
     avg_pct = row["achievement_pct"]
     rec = recommended_action(avg_pct)
     with st.container(border=True):
-        c1, c2, c3 = st.columns([3, 2, 2])
+        c1, c2 = st.columns([3, 2])
         c1.markdown(f"### {facility}")
         c2.metric("Avg. Achievement", badge(avg_pct))
+
         detail = view[view["facility"] == facility][["data_element", "target", "actual", "achievement_pct"]]
-        with c3:
-            with st.expander("View data elements"):
-                # na_rep handles missing achievement % gracefully (e.g. no targets
-                # uploaded yet for a live DHIS2 pull) instead of crashing on format()
-                st.dataframe(
-                    detail.style.format({"achievement_pct": "{:.1f}%"}, na_rep="N/A"),
-                    hide_index=True, use_container_width=True
-                )
+        with st.expander("View data elements", expanded=False):
+            # na_rep handles missing achievement % gracefully (e.g. no targets
+            # uploaded yet for a live DHIS2 pull) instead of crashing on format()
+            styler = detail.style.format({"achievement_pct": "{:.1f}%"}, na_rep="N/A")
+            # pandas >=2.1 renamed Styler.applymap to .map; support either so this
+            # doesn't break depending on exactly which pandas version gets installed
+            color_fn = styler.map if hasattr(styler, "map") else styler.applymap
+            styled = color_fn(_pct_cell_style, subset=["achievement_pct"])
+            st.dataframe(styled, hide_index=True, use_container_width=True)
 
         with st.expander(f"⚡ Actions to be taken" + (f" — recommended: {ACTION_LABELS[rec]}" if rec else "")):
             if not can_act:
