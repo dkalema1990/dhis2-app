@@ -115,8 +115,8 @@ else:
                     else:
                         st.warning("Upload a targets CSV to compute achievement %.")
                         df_pulled = raw.rename(columns={"value": "actual"})
-                        df_pulled["target"] = None
-                        df_pulled["achievement_pct"] = None
+                        df_pulled["target"] = pd.NA
+                        df_pulled["achievement_pct"] = pd.NA
                     st.session_state["live_df"] = df_pulled
                     st.session_state["period"] = period_code
 
@@ -183,8 +183,12 @@ for _, row in summary.iterrows():
         detail = view[view["facility"] == facility][["data_element", "target", "actual", "achievement_pct"]]
         with c3:
             with st.expander("View data elements"):
-                st.dataframe(detail.style.format({"achievement_pct": "{:.1f}%"}), hide_index=True,
-                              use_container_width=True)
+                # na_rep handles missing achievement % gracefully (e.g. no targets
+                # uploaded yet for a live DHIS2 pull) instead of crashing on format()
+                st.dataframe(
+                    detail.style.format({"achievement_pct": "{:.1f}%"}, na_rep="N/A"),
+                    hide_index=True, use_container_width=True
+                )
 
         with st.expander(f"⚡ Actions to be taken" + (f" — recommended: {ACTION_LABELS[rec]}" if rec else "")):
             if not can_act:
