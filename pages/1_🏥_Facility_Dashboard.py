@@ -138,6 +138,23 @@ f_sel = col1.multiselect("Filter facilities", facilities, default=facilities)
 e_sel = col2.multiselect("Filter data elements", elements, default=elements)
 view = df[df["facility"].isin(f_sel) & df["data_element"].isin(e_sel)]
 
+# --- Targets template download -----------------------------------------
+# Every facility × data element combo currently in view, with a blank
+# `target` column — fill it in at your own pace, then re-upload it in the
+# "Real DHIS2 pull settings" section above to compute achievement %.
+template_df = (view[["facility", "data_element"]]
+                .drop_duplicates()
+                .sort_values(["facility", "data_element"])
+                .reset_index(drop=True))
+template_df["target"] = ""
+st.download_button(
+    "📥 Download targets template (CSV)",
+    data=template_df.to_csv(index=False).encode("utf-8"),
+    file_name="targets_template.csv",
+    mime="text/csv",
+    help=f"{len(template_df)} facility × data element rows, ready to fill in and re-upload.",
+)
+
 RED, YELLOW = 50, 90  # <RED = red, RED-<YELLOW = yellow, >=YELLOW = green
 
 
