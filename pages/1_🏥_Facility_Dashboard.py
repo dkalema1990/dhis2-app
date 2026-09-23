@@ -95,8 +95,6 @@ else:
                     ou_ids = []
                     st.caption("Click \"Load org units at this level\" above to pick facilities.")
 
-                target_csv = st.file_uploader("Upload targets CSV (columns: facility, data_element, target)")
-
                 if st.button("Pull from DHIS2", type="primary") and de_ids and ou_ids:
                     try:
                         with st.spinner("Pulling analytics from DHIS2..."):
@@ -107,18 +105,13 @@ else:
                                   "DHIS2 login has access to it, and confirm analytics tables have been "
                                   "generated for this period on your DHIS2 instance.")
                         st.stop()
-                    if target_csv is not None:
-                        targets = pd.read_csv(target_csv)
-                        df_pulled = raw.merge(targets, on=["facility", "data_element"], how="left")
-                        df_pulled = df_pulled.rename(columns={"value": "actual"})
-                        df_pulled["achievement_pct"] = (df_pulled["actual"] / df_pulled["target"] * 100).round(1)
-                    else:
-                        st.warning("Upload a targets CSV to compute achievement %.")
-                        df_pulled = raw.rename(columns={"value": "actual"})
-                        df_pulled["target"] = pd.NA
-                        df_pulled["achievement_pct"] = pd.NA
+                    df_pulled = raw.rename(columns={"value": "actual"})
+                    df_pulled["target"] = pd.NA
+                    df_pulled["achievement_pct"] = pd.NA
                     st.session_state["live_df"] = df_pulled
                     st.session_state["period"] = period_code
+                    st.info("Data pulled. Scroll down to \"🎯 Apply your own targets\" to add targets and see "
+                              "achievement %.")
 
                 if st.button("↻ Refresh dataset/data element/org unit lists"):
                     for k in list(st.session_state.keys()):
@@ -127,6 +120,19 @@ else:
                             del st.session_state[k]
                     st.rerun()
     df = st.session_state.get("live_df", get_mock_facility_data(st.session_state.get("period", "2026Q3")))
+
+# ---------------------------------------------------------------------
+# Apply manually-entered targets — independent of mock vs. live DHIS2,
+# and independent of re-pulling. Once applied, they stick (via
+# session_state) until you clear them or apply a new file.
+# ---------------------------------------------------------------------
+manual_targets = st.session_state.get("manual_targets")
+if manual_targets is not None and not manual_targets.empty:
+    df = df.drop(columns=["target", "achievement_pct"], errors="ignore").merge(
+        manual_targets, on=["facility", "data_element"], how="left"
+    )
+    df["target"] = pd.to_numeric(df["target"], errors="coerce")
+    df["achievement_pct"] = (df["actual"] / df["target"] * 100).round(1)
 
 # ---------------------------------------------------------------------
 # Filters
@@ -138,22 +144,60 @@ f_sel = col1.multiselect("Filter facilities", facilities, default=facilities)
 e_sel = col2.multiselect("Filter data elements", elements, default=elements)
 view = df[df["facility"].isin(f_sel) & df["data_element"].isin(e_sel)]
 
-# --- Targets template download -----------------------------------------
-# Every facility × data element combo currently in view, with a blank
-# `target` column — fill it in at your own pace, then re-upload it in the
-# "Real DHIS2 pull settings" section above to compute achievement %.
-template_df = (view[["facility", "data_element"]]
-                .drop_duplicates()
-                .sort_values(["facility", "data_element"])
-                .reset_index(drop=True))
-template_df["target"] = ""
-st.download_button(
-    "📥 Download targets template (CSV)",
-    data=template_df.to_csv(index=False).encode("utf-8"),
-    file_name="targets_template.csv",
-    mime="text/csv",
-    help=f"{len(template_df)} facility × data element rows, ready to fill in and re-upload.",
-)
+# --- Targets: download a template, then apply it whenever you're ready --
+st.divider()
+with st.expander("🎯 Targets — download a template, fill it in, then apply it here", expanded=True):
+    st.markdown(
+        "**Step 1.** Download a template listing every facility × data element combo below "
+        "(respects the filters above). **Step 2.** Fill in the `target` column in Excel/Sheets, "
+        "at your own pace — leave rows blank for anything you're not ready to set yet. "
+        "**Step 3.** Upload it below and click Apply — achievement % updates immediately."
+    )
+    template_df = (view[["facility", "data_element"]]
+                    .drop_duplicates()
+                    .sort_values(["facility", "data_element"])
+                    .reset_index(drop=True))
+    template_df["target"] = ""
+    st.download_button(
+        "📥 Download targets template (CSV)",
+        data=template_df.to_csv(index=False).encode("utf-8"),
+        file_name="targets_template.csv",
+        mime="text/csv",
+        help=f"{len(template_df)} facility × data element rows, ready to fill in and re-upload.",
+    )
+
+    uploaded = st.file_uploader("Upload your filled-in targets CSV", type=["csv"], key="targets_upload")
+    c1, c2 = st.columns(2)
+    if c1.button("✅ Apply targets", type="primary", disabled=uploaded is None):
+        try:
+            new_targets = pd.read_csv(uploaded)
+        except Exception as e:
+            st.error(f"Couldn't read that CSV: {e}")
+            st.stop()
+        missing_cols = {"facility", "data_element", "target"} - set(new_targets.columns)
+        if missing_cols:
+            st.error(f"CSV is missing required column(s): {', '.join(missing_cols)}")
+            st.stop()
+        new_targets = new_targets.dropna(subset=["target"])
+        new_targets = new_targets[new_targets["target"].astype(str).str.strip() != ""]
+        if new_targets.empty:
+            st.warning("No rows with a filled-in target were found — nothing to apply yet.")
+        else:
+            # Merge with any previously-applied targets so you can top it up
+            # incrementally instead of needing every row filled in at once.
+            existing = st.session_state.get("manual_targets")
+            combined = new_targets[["facility", "data_element", "target"]]
+            if existing is not None and not existing.empty:
+                combined = (pd.concat([existing, combined])
+                              .drop_duplicates(subset=["facility", "data_element"], keep="last"))
+            st.session_state["manual_targets"] = combined
+            st.success(f"Applied targets for {len(new_targets)} row(s).")
+            st.rerun()
+    if c2.button("🗑️ Clear all applied targets", disabled="manual_targets" not in st.session_state):
+        st.session_state.pop("manual_targets", None)
+        st.rerun()
+    if manual_targets is not None and not manual_targets.empty:
+        st.caption(f"Currently applied: targets set for {len(manual_targets)} facility × data element row(s).")
 
 RED, YELLOW = 50, 90  # <RED = red, RED-<YELLOW = yellow, >=YELLOW = green
 
