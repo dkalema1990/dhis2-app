@@ -149,15 +149,25 @@ st.divider()
 with st.expander("🎯 Targets — download a template, fill it in, then apply it here", expanded=True):
     st.markdown(
         "**Step 1.** Download a template listing every facility × data element combo below "
-        "(respects the filters above). **Step 2.** Fill in the `target` column in Excel/Sheets, "
-        "at your own pace — leave rows blank for anything you're not ready to set yet. "
-        "**Step 3.** Upload it below and click Apply — achievement % updates immediately."
+        "(respects the filters above) — already-applied targets are pre-filled, so you only "
+        "need to fill in rows for anything new. **Step 2.** Fill in the `target` column in "
+        "Excel/Sheets, at your own pace. **Step 3.** Upload it below and click Apply — "
+        "achievement % updates immediately."
     )
     template_df = (view[["facility", "data_element"]]
                     .drop_duplicates()
                     .sort_values(["facility", "data_element"])
                     .reset_index(drop=True))
-    template_df["target"] = ""
+    if manual_targets is not None and not manual_targets.empty:
+        # Pre-fill with whatever's already been applied, so re-downloading after
+        # adding new data elements only leaves the genuinely new rows blank.
+        template_df = template_df.merge(manual_targets, on=["facility", "data_element"], how="left")
+        template_df["target"] = template_df["target"].fillna("")
+        new_rows = int((template_df["target"] == "").sum())
+        st.caption(f"Pre-filled with your {len(manual_targets)} previously-applied target(s) — "
+                    f"{new_rows} row(s) still need a target.")
+    else:
+        template_df["target"] = ""
     st.download_button(
         "📥 Download targets template (CSV)",
         data=template_df.to_csv(index=False).encode("utf-8"),
@@ -166,9 +176,13 @@ with st.expander("🎯 Targets — download a template, fill it in, then apply i
         help=f"{len(template_df)} facility × data element rows, ready to fill in and re-upload.",
     )
 
-    uploaded = st.file_uploader("Upload your filled-in targets CSV", type=["csv"], key="targets_upload")
+    uploaded = st.file_uploader("Upload your filled-in targets CSV", type=["csv"], key="targets_upload",
+                                  disabled=not can_act)
+    if not can_act:
+        st.info("Your role (`viewer`) can view and download this template, but only `submitter`/`admin` "
+                  "roles can apply or clear targets.")
     c1, c2 = st.columns(2)
-    if c1.button("✅ Apply targets", type="primary", disabled=uploaded is None):
+    if c1.button("✅ Apply targets", type="primary", disabled=(uploaded is None or not can_act)):
         try:
             new_targets = pd.read_csv(uploaded)
         except Exception as e:
@@ -193,7 +207,7 @@ with st.expander("🎯 Targets — download a template, fill it in, then apply i
             st.session_state["manual_targets"] = combined
             st.success(f"Applied targets for {len(new_targets)} row(s).")
             st.rerun()
-    if c2.button("🗑️ Clear all applied targets", disabled="manual_targets" not in st.session_state):
+    if c2.button("🗑️ Clear all applied targets", disabled=("manual_targets" not in st.session_state or not can_act)):
         st.session_state.pop("manual_targets", None)
         st.rerun()
     if manual_targets is not None and not manual_targets.empty:
