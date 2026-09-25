@@ -1,6 +1,8 @@
 import streamlit as st
 import pandas as pd
 import requests
+import plotly.express as px
+import plotly.graph_objects as go
 import auth
 import gsheets
 from dhis2_client import get_mock_facility_data, generate_periods
@@ -293,6 +295,66 @@ st.subheader("Achievement by Facility")
 
 summary = view.groupby("facility", as_index=False)["achievement_pct"].mean().round(1)
 summary = summary.sort_values("achievement_pct")
+
+
+def _band(pct):
+    if pd.isna(pct):
+        return "No target"
+    if pct < RED:
+        return "Red (<50%)"
+    if pct < YELLOW:
+        return "Yellow (50–89%)"
+    return "Green (≥90%)"
+
+
+BAND_COLORS = {"Red (<50%)": "#e05252", "Yellow (50–89%)": "#e0b23c",
+               "Green (≥90%)": "#3fa54a", "No target": "#b0b0b0"}
+
+# ---------------------------------------------------------------------
+# Visual overview: KPI counts, a color-coded bar chart per facility, and
+# a facility × data element heatmap — sits above the individual cards.
+# ---------------------------------------------------------------------
+if not summary.empty:
+    summary["band"] = summary["achievement_pct"].apply(_band)
+
+    k1, k2, k3, k4 = st.columns(4)
+    k1.metric("Facilities shown", len(summary))
+    k2.metric("🔴 Red (<50%)", int((summary["band"] == "Red (<50%)").sum()))
+    k3.metric("🟡 Yellow (50–89%)", int((summary["band"] == "Yellow (50–89%)").sum()))
+    k4.metric("🟢 Green (≥90%)", int((summary["band"] == "Green (≥90%)").sum()))
+
+    tab_bar, tab_heat = st.tabs(["📊 Avg. achievement by facility", "🗺️ Heatmap (facility × data element)"])
+
+    with tab_bar:
+        bar_df = summary.sort_values("achievement_pct")
+        fig = go.Figure(go.Bar(
+            x=bar_df["achievement_pct"], y=bar_df["facility"], orientation="h",
+            marker_color=[BAND_COLORS[b] for b in bar_df["band"]],
+            text=bar_df["achievement_pct"].map(lambda v: f"{v:.0f}%" if pd.notna(v) else "N/A"),
+            textposition="outside",
+        ))
+        fig.add_vline(x=RED, line_dash="dot", line_color="#e05252", opacity=0.5)
+        fig.add_vline(x=YELLOW, line_dash="dot", line_color="#3fa54a", opacity=0.5)
+        fig.update_layout(
+            height=max(300, 32 * len(bar_df)), margin=dict(l=10, r=10, t=10, b=10),
+            xaxis_title="Avg. achievement %", yaxis_title="", showlegend=False,
+        )
+        st.plotly_chart(fig, use_container_width=True)
+
+    with tab_heat:
+        pivot = view.pivot_table(index="facility", columns="data_element",
+                                   values="achievement_pct", aggfunc="mean")
+        if pivot.empty:
+            st.info("Nothing to show for the current filters.")
+        else:
+            fig2 = px.imshow(
+                pivot, color_continuous_scale="RdYlGn", zmin=0, zmax=120,
+                aspect="auto", text_auto=".0f",
+                labels=dict(color="Achievement %"),
+            )
+            fig2.update_layout(height=max(300, 40 * len(pivot)), margin=dict(l=10, r=10, t=10, b=10))
+            st.plotly_chart(fig2, use_container_width=True)
+            st.caption("Gray/blank cells mean no target has been set for that facility × data element yet.")
 
 for _, row in summary.iterrows():
     facility = row["facility"]
