@@ -49,6 +49,8 @@ SHEET_COLUMNS = {
            "lessons_learned", "dissemination_plan", "responsible_person",
            "follow_up_date", "submitted_by", "timestamp"],
     "Users": ["username", "password_hash", "role", "display_name"],
+    "AchievementData": ["facility", "data_element", "period", "actual", "target",
+                          "achievement_pct", "published_by", "published_at"],
 }
 
 
@@ -182,6 +184,42 @@ def delete_record(sheet: str, row: int):
     ws = _get_or_create_ws(sheet)
     _wrap_gspread_errors(ws.delete_rows)(row)
     get_all.clear()
+
+
+# ---------------------------------------------------------------------
+# "Published" achievement analysis — lets an admin/submitter's pulled
+# DHIS2 data + applied targets be shared with everyone (including
+# `viewer` users), instead of only existing in their own browser session.
+# ---------------------------------------------------------------------
+def publish_achievement_data(df: pd.DataFrame, published_by: str):
+    """Overwrite the shared AchievementData sheet with the given dataset —
+    this becomes what every viewer sees by default until republished."""
+    cols = SHEET_COLUMNS["AchievementData"]
+    out = df.copy()
+    for c in ["facility", "data_element", "period", "actual", "target", "achievement_pct"]:
+        if c not in out.columns:
+            out[c] = ""
+    out["published_by"] = published_by
+    out["published_at"] = datetime.now().isoformat(timespec="seconds")
+    out = out[cols].fillna("")
+
+    ws = _get_or_create_ws("AchievementData")
+    rows = [cols] + out.astype(str).values.tolist()
+    _wrap_gspread_errors(ws.clear)()
+    _wrap_gspread_errors(ws.update)(rows)
+    get_all.clear()
+
+
+def get_published_achievement_data() -> pd.DataFrame:
+    """The shared analysis, with actual/target/achievement_pct coerced back
+    to numeric (Sheets stores everything as text)."""
+    df = get_all("AchievementData")
+    if df.empty:
+        return df
+    for c in ["actual", "target", "achievement_pct"]:
+        if c in df.columns:
+            df[c] = pd.to_numeric(df[c], errors="coerce")
+    return df
 
 
 # Thin convenience wrappers so the form pages read naturally

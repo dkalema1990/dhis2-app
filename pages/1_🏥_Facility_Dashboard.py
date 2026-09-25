@@ -2,19 +2,36 @@ import streamlit as st
 import pandas as pd
 import requests
 import auth
+import gsheets
 from dhis2_client import get_mock_facility_data, generate_periods
 
 st.set_page_config(page_title="Facility Dashboard", page_icon="🏥", layout="wide")
 auth.require_login()
 auth.sidebar_user_badge()
-can_act = st.session_state["user"]["role"] in ("submitter", "admin")
+role = st.session_state["user"]["role"]
+can_act = role in ("submitter", "admin")
 
 st.title("🏥 Facility Achievement Dashboard")
 
 # ---------------------------------------------------------------------
-# Load data: real DHIS2 pull (if connected + configured) or mock data
+# Load data.
+# `viewer` users always see the shared, PUBLISHED analysis (from Google
+# Sheets) — not their own session, since they have no DHIS2 connection or
+# applied targets of their own. `submitter`/`admin` work in their own
+# session (mock or a live DHIS2 pull) and can publish it for viewers to see.
 # ---------------------------------------------------------------------
-if st.session_state.get("use_mock", True) or "dhis2_client" not in st.session_state:
+if role == "viewer":
+    published = gsheets.get_published_achievement_data() if gsheets.is_configured() else pd.DataFrame()
+    if published is None or published.empty:
+        st.info("No analysis has been published yet. Showing demo data in the meantime — "
+                  "ask an admin/submitter to publish their analysis from the Facility Dashboard.")
+        df = get_mock_facility_data(st.session_state.get("period", "2026Q3"))
+    else:
+        published_by = published["published_by"].iloc[0] if "published_by" in published.columns else "an admin"
+        published_at = published["published_at"].iloc[0] if "published_at" in published.columns else ""
+        st.success(f"📢 Showing the analysis published by **{published_by}** ({published_at}).")
+        df = published.drop(columns=["_row", "published_by", "published_at"], errors="ignore")
+elif st.session_state.get("use_mock", True) or "dhis2_client" not in st.session_state:
     period = st.session_state.get("period", "2026Q3")
     df = st.session_state.get("mock_df", get_mock_facility_data(period))
 else:
@@ -127,7 +144,7 @@ else:
 # session_state) until you clear them or apply a new file.
 # ---------------------------------------------------------------------
 manual_targets = st.session_state.get("manual_targets")
-if manual_targets is not None and not manual_targets.empty:
+if role != "viewer" and manual_targets is not None and not manual_targets.empty:
     df = df.drop(columns=["target", "achievement_pct"], errors="ignore").merge(
         manual_targets, on=["facility", "data_element"], how="left"
     )
@@ -212,6 +229,24 @@ with st.expander("🎯 Targets — download a template, fill it in, then apply i
         st.rerun()
     if manual_targets is not None and not manual_targets.empty:
         st.caption(f"Currently applied: targets set for {len(manual_targets)} facility × data element row(s).")
+
+# --- Publish: share this analysis with everyone, including viewers -----
+if can_act:
+    with st.expander("📢 Publish this analysis for everyone to see", expanded=False):
+        st.markdown(
+            "`viewer` users don't have their own DHIS2 connection or applied targets — "
+            "they see whatever was last **published** here. Publishing saves the dataset "
+            "currently shown above (including any targets you've applied) to a shared "
+            "Google Sheet, replacing whatever was published before."
+        )
+        if st.button("📢 Publish current analysis", type="primary"):
+            publish_df = df[["facility", "data_element", "period", "actual", "target", "achievement_pct"]].copy() \
+                if "period" in df.columns else df.assign(period=st.session_state.get("period", "2026Q3"))
+            try:
+                gsheets.publish_achievement_data(publish_df, st.session_state["user"]["display_name"])
+                st.success("Published! Viewers will now see this analysis by default.")
+            except RuntimeError as e:
+                st.error(f"Couldn't publish: {e}")
 
 RED, YELLOW = 50, 90  # <RED = red, RED-<YELLOW = yellow, >=YELLOW = green
 
