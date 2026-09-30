@@ -22,15 +22,20 @@ st.title("🏥 Facility Achievement Dashboard")
 # session (mock or a live DHIS2 pull) and can publish it for viewers to see.
 # ---------------------------------------------------------------------
 if role == "viewer":
+    vc1, vc2 = st.columns([5, 1])
+    if vc2.button("🔄 Refresh", help="Force-reload the published analysis now instead of waiting "
+                                        "up to 30s for the cache to refresh on its own."):
+        gsheets.get_all.clear()
+        st.rerun()
     published = gsheets.get_published_achievement_data() if gsheets.is_configured() else pd.DataFrame()
     if published is None or published.empty:
-        st.info("No analysis has been published yet. Showing demo data in the meantime — "
+        vc1.info("No analysis has been published yet. Showing demo data in the meantime — "
                   "ask an admin/submitter to publish their analysis from the Facility Dashboard.")
         df = get_mock_facility_data(st.session_state.get("period", "2026Q3"))
     else:
         published_by = published["published_by"].iloc[0] if "published_by" in published.columns else "an admin"
         published_at = published["published_at"].iloc[0] if "published_at" in published.columns else ""
-        st.success(f"📢 Showing the analysis published by **{published_by}** ({published_at}).")
+        vc1.success(f"📢 Showing the analysis published by **{published_by}** ({published_at}).")
         df = published.drop(columns=["_row", "published_by", "published_at"], errors="ignore")
 elif st.session_state.get("use_mock", True) or "dhis2_client" not in st.session_state:
     period = st.session_state.get("period", "2026Q3")
@@ -234,19 +239,52 @@ with st.expander("🎯 Targets — download a template, fill it in, then apply i
 
 # --- Publish: share this analysis with everyone, including viewers -----
 if can_act:
-    with st.expander("📢 Publish this analysis for everyone to see", expanded=False):
+    with st.expander("📢 Publish this analysis for everyone to see", expanded=True):
         st.markdown(
             "`viewer` users don't have their own DHIS2 connection or applied targets — "
             "they see whatever was last **published** here. Publishing saves the dataset "
             "currently shown above (including any targets you've applied) to a shared "
             "Google Sheet, replacing whatever was published before."
         )
+
+        # Show what's LIVE right now — the exact thing a viewer sees — so you
+        # can confirm a publish worked without needing a separate viewer login,
+        # and catch it immediately if this environment's Google Sheet doesn't
+        # match what you expect (e.g. local vs. Streamlit Cloud secrets pointing
+        # at different sheets).
+        st.markdown("**👁️ Currently published (what viewers see right now):**")
+        try:
+            currently_published = gsheets.get_published_achievement_data()
+        except RuntimeError as e:
+            currently_published = None
+            st.error(f"Couldn't check the published data: {e}")
+        if currently_published is None:
+            pass
+        elif currently_published.empty:
+            st.caption("Nothing published yet — viewers currently see demo data.")
+        else:
+            pub_by = currently_published["published_by"].iloc[0] if "published_by" in currently_published.columns else "?"
+            pub_at = currently_published["published_at"].iloc[0] if "published_at" in currently_published.columns else "?"
+            st.caption(f"Published by **{pub_by}** at {pub_at} — {len(currently_published)} row(s).")
+            st.dataframe(
+                currently_published.drop(columns=["_row", "published_by", "published_at"], errors="ignore"),
+                hide_index=True, use_container_width=True, height=180,
+            )
+
+        st.divider()
+        # Preview of exactly what WILL be published if you click the button below —
+        # uses `view` (the filtered set you're currently looking at above), not the
+        # full unfiltered dataset, so what you see here is exactly what viewers get.
+        publish_df = view[["facility", "data_element", "period", "actual", "target", "achievement_pct"]].copy() \
+            if "period" in view.columns else view.assign(period=st.session_state.get("period", "2026Q3"))
+        st.markdown(f"**📝 About to publish ({len(publish_df)} row(s), matching your current filters above):**")
+        st.dataframe(publish_df, hide_index=True, use_container_width=True, height=180)
+
         if st.button("📢 Publish current analysis", type="primary"):
-            publish_df = df[["facility", "data_element", "period", "actual", "target", "achievement_pct"]].copy() \
-                if "period" in df.columns else df.assign(period=st.session_state.get("period", "2026Q3"))
             try:
                 gsheets.publish_achievement_data(publish_df, st.session_state["user"]["display_name"])
-                st.success("Published! Viewers will now see this analysis by default.")
+                st.success(f"Published {len(publish_df)} row(s)! Viewers will now see this analysis by default.")
+                st.rerun()  # refresh the "currently published" preview above immediately
             except RuntimeError as e:
                 st.error(f"Couldn't publish: {e}")
 
