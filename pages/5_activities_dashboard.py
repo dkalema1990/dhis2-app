@@ -3,7 +3,6 @@ import plotly.express as px
 import auth
 import gsheets
 
-st.set_page_config(page_title="Activities Dashboard", page_icon="📊", layout="wide")
 auth.require_login()
 auth.sidebar_user_badge()
 is_admin = st.session_state["user"]["role"] == "admin"

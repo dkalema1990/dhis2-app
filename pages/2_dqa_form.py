@@ -3,7 +3,6 @@ from datetime import date
 import auth
 import gsheets
 
-st.set_page_config(page_title="DQA Form", page_icon="📋", layout="centered")
 auth.require_role("submitter", "admin")
 auth.sidebar_user_badge()
 
@@ -77,5 +76,5 @@ if submitted:
             "pushed_to_dhis2": pushed,
         })
         st.success(f"DQA outcome saved for **{facility}**.")
-        st.page_link("pages/5_📊_Activities_Dashboard.py", label="View Activities Dashboard →")
-        st.page_link("pages/1_🏥_Facility_Dashboard.py", label="← Back to Facility Dashboard")
+        st.page_link("pages/5_activities_dashboard.py", label="View Activities Dashboard →")
+        st.page_link("pages/1_facility_dashboard.py", label="← Back to Facility Dashboard")

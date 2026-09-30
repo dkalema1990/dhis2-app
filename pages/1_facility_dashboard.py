@@ -7,7 +7,6 @@ import auth
 import gsheets
 from dhis2_client import get_mock_facility_data, generate_periods
 
-st.set_page_config(page_title="Facility Dashboard", page_icon="🏥", layout="wide")
 auth.require_login()
 auth.sidebar_user_badge()
 role = st.session_state["user"]["role"]
@@ -173,20 +172,21 @@ with st.expander("🎯 Targets — download a template, fill it in, then apply i
         "Excel/Sheets, at your own pace. **Step 3.** Upload it below and click Apply — "
         "achievement % updates immediately."
     )
-    template_df = (view[["facility", "data_element"]]
+    # Pre-fill from whatever target values are already part of the analysis
+    # currently on screen — this works the same whether that's your own
+    # applied targets (admin/submitter) or a published analysis (viewer),
+    # since `view` already carries the merged target column either way.
+    template_df = (view[["facility", "data_element", "target"]]
                     .drop_duplicates()
                     .sort_values(["facility", "data_element"])
                     .reset_index(drop=True))
-    if manual_targets is not None and not manual_targets.empty:
-        # Pre-fill with whatever's already been applied, so re-downloading after
-        # adding new data elements only leaves the genuinely new rows blank.
-        template_df = template_df.merge(manual_targets, on=["facility", "data_element"], how="left")
-        template_df["target"] = template_df["target"].fillna("")
-        new_rows = int((template_df["target"] == "").sum())
-        st.caption(f"Pre-filled with your {len(manual_targets)} previously-applied target(s) — "
-                    f"{new_rows} row(s) still need a target.")
-    else:
-        template_df["target"] = ""
+    template_df["target"] = pd.to_numeric(template_df["target"], errors="coerce")
+    filled = int(template_df["target"].notna().sum())
+    blank = len(template_df) - filled
+    template_df["target"] = template_df["target"].apply(lambda v: "" if pd.isna(v) else v)
+    if filled:
+        st.caption(f"Pre-filled with the {filled} target(s) already set for this analysis — "
+                    f"{blank} row(s) still need one.")
     st.download_button(
         "📥 Download targets template (CSV)",
         data=template_df.to_csv(index=False).encode("utf-8"),
@@ -394,13 +394,13 @@ for _, row in summary.iterrows():
             btn_type = lambda action: "primary" if action == rec else "secondary"
             if a1.button(ACTION_LABELS["DQA"], key=f"dqa_{facility}", use_container_width=True,
                           type=btn_type("DQA"), disabled=not can_act):
-                route("DQA", "pages/2_📋_DQA_Form.py")
+                route("DQA", "pages/2_dqa_form.py")
             if a2.button(ACTION_LABELS["SSM"], key=f"ssm_{facility}", use_container_width=True,
                           type=btn_type("SSM"), disabled=not can_act):
-                route("SSM", "pages/3_🤝_Support_Supervision_Form.py")
+                route("SSM", "pages/3_support_supervision_form.py")
             if a3.button(ACTION_LABELS["LV"], key=f"lv_{facility}", use_container_width=True,
                           type=btn_type("LV"), disabled=not can_act):
-                route("LV", "pages/4_📘_Learning_Visit_Form.py")
+                route("LV", "pages/4_learning_visit_form.py")
 
 st.caption("🔴 <50%   🟡 50–89%   🟢 ≥90% achievement  ·  highlighted button = system-recommended action "
             "(you can still pick any of the three)")

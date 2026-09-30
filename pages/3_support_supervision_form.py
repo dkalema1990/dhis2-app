@@ -3,7 +3,6 @@ from datetime import date
 import auth
 import gsheets
 
-st.set_page_config(page_title="Support Supervision Form", page_icon="🤝", layout="centered")
 auth.require_role("submitter", "admin")
 auth.sidebar_user_badge()
 
@@ -44,5 +43,5 @@ if submitted:
             "follow_up_date": str(follow_up_date), "submitted_by": submitted_by,
         })
         st.success(f"Support supervision outcome saved for **{facility}**.")
-        st.page_link("pages/5_📊_Activities_Dashboard.py", label="View Activities Dashboard →")
-        st.page_link("pages/1_🏥_Facility_Dashboard.py", label="← Back to Facility Dashboard")
+        st.page_link("pages/5_activities_dashboard.py", label="View Activities Dashboard →")
+        st.page_link("pages/1_facility_dashboard.py", label="← Back to Facility Dashboard")
