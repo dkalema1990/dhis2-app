@@ -160,14 +160,15 @@ else:
     df = st.session_state.get("live_df", get_mock_facility_data(st.session_state.get("period", "2026Q3")))
 
 # ---------------------------------------------------------------------
-# Apply manually-entered targets — independent of mock vs. live DHIS2,
-# and independent of re-pulling. Once applied, they stick (via
-# session_state) until you clear them or apply a new file.
+# Apply persisted targets — stored in Google Sheets (not just this
+# session), so they survive logout/reboot and are shared across whoever's
+# working on the analysis. Independent of mock vs. live DHIS2 and of
+# re-pulling.
 # ---------------------------------------------------------------------
-manual_targets = st.session_state.get("manual_targets")
-if role != "viewer" and manual_targets is not None and not manual_targets.empty:
+manual_targets = gsheets.get_targets() if (role != "viewer" and gsheets.is_configured()) else None
+if manual_targets is not None and not manual_targets.empty:
     df = df.drop(columns=["target", "achievement_pct"], errors="ignore").merge(
-        manual_targets, on=["facility", "data_element"], how="left"
+        manual_targets[["facility", "data_element", "target"]], on=["facility", "data_element"], how="left"
     )
     df["target"] = pd.to_numeric(df["target"], errors="coerce")
     df["achievement_pct"] = (df["actual"] / df["target"] * 100).round(1)
@@ -236,21 +237,27 @@ with st.expander("🎯 Targets — download a template, fill it in, then apply i
         if new_targets.empty:
             st.warning("No rows with a filled-in target were found — nothing to apply yet.")
         else:
-            # Merge with any previously-applied targets so you can top it up
-            # incrementally instead of needing every row filled in at once.
-            existing = st.session_state.get("manual_targets")
-            combined = new_targets[["facility", "data_element", "target"]]
-            if existing is not None and not existing.empty:
-                combined = (pd.concat([existing, combined])
-                              .drop_duplicates(subset=["facility", "data_element"], keep="last"))
-            st.session_state["manual_targets"] = combined
-            st.success(f"Applied targets for {len(new_targets)} row(s).")
+            # Saved permanently to Google Sheets, merged with whatever's already
+            # there — new values win for matching rows, nothing else is touched.
+            # This is what makes targets survive logout/reboot and reappear
+            # pre-filled in future template downloads, including for other users.
+            try:
+                gsheets.save_targets(new_targets, st.session_state["user"]["display_name"])
+                st.success(f"Saved targets for {len(new_targets)} row(s) — these are now permanent.")
+                st.rerun()
+            except RuntimeError as e:
+                st.error(f"Couldn't save targets: {e}")
+    if c2.button("🗑️ Clear all targets (for everyone)",
+                  disabled=(manual_targets is None or manual_targets.empty or not can_act)):
+        try:
+            gsheets.clear_targets()
+            st.warning("All persisted targets cleared.")
             st.rerun()
-    if c2.button("🗑️ Clear all applied targets", disabled=("manual_targets" not in st.session_state or not can_act)):
-        st.session_state.pop("manual_targets", None)
-        st.rerun()
+        except RuntimeError as e:
+            st.error(f"Couldn't clear targets: {e}")
     if manual_targets is not None and not manual_targets.empty:
-        st.caption(f"Currently applied: targets set for {len(manual_targets)} facility × data element row(s).")
+        st.caption(f"Currently saved: targets set for {len(manual_targets)} facility × data element "
+                    f"row(s) — persisted in Google Sheets, not just this session.")
 
 # --- Publish: share this analysis with everyone, including viewers -----
 if can_act:

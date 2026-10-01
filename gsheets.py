@@ -51,6 +51,7 @@ SHEET_COLUMNS = {
     "Users": ["username", "password_hash", "role", "display_name"],
     "AchievementData": ["facility", "data_element", "period", "actual", "target",
                           "achievement_pct", "published_by", "published_at"],
+    "Targets": ["facility", "data_element", "target", "updated_by", "updated_at"],
 }
 
 
@@ -220,6 +221,60 @@ def get_published_achievement_data() -> pd.DataFrame:
         if c in df.columns:
             df[c] = pd.to_numeric(df[c], errors="coerce")
     return df
+
+
+# ---------------------------------------------------------------------
+# Persistent targets — these used to live only in st.session_state (lost
+# on logout/reboot). Now stored in their own "Targets" sheet, shared and
+# permanent: upsert by (facility, data_element), so entering a target once
+# is never lost, and newly-downloaded templates always come pre-filled
+# with whatever's already been set, even across logins/devices.
+# ---------------------------------------------------------------------
+def save_targets(new_targets: pd.DataFrame, updated_by: str) -> pd.DataFrame:
+    """Merge new_targets (facility, data_element, target) into whatever's
+    already persisted — new values win for matching rows, everything else
+    is kept as-is — then write the combined result back. Returns the
+    combined DataFrame."""
+    cols = SHEET_COLUMNS["Targets"]
+    existing = get_all("Targets")
+    if not existing.empty:
+        existing = existing.drop(columns=["_row"], errors="ignore")
+
+    stamped = new_targets[["facility", "data_element", "target"]].copy()
+    stamped["updated_by"] = updated_by
+    stamped["updated_at"] = datetime.now().isoformat(timespec="seconds")
+
+    if existing.empty:
+        combined = stamped
+    else:
+        combined = (pd.concat([existing, stamped], ignore_index=True)
+                      .drop_duplicates(subset=["facility", "data_element"], keep="last"))
+    combined = combined[cols].fillna("")
+
+    ws = _get_or_create_ws("Targets")
+    rows = [cols] + combined.astype(str).values.tolist()
+    _wrap_gspread_errors(ws.clear)()
+    _wrap_gspread_errors(ws.update)(rows)
+    get_all.clear()
+    return combined
+
+
+def get_targets() -> pd.DataFrame:
+    """All persisted targets, with `target` coerced to numeric."""
+    df = get_all("Targets")
+    if df.empty:
+        return df
+    df = df.drop(columns=["_row"], errors="ignore")
+    df["target"] = pd.to_numeric(df["target"], errors="coerce")
+    return df
+
+
+def clear_targets():
+    """Wipe all persisted targets (header row kept) — affects everyone."""
+    ws = _get_or_create_ws("Targets")
+    _wrap_gspread_errors(ws.clear)()
+    _wrap_gspread_errors(ws.append_row)(SHEET_COLUMNS["Targets"])
+    get_all.clear()
 
 
 # Thin convenience wrappers so the form pages read naturally
