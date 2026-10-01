@@ -39,7 +39,22 @@ if role == "viewer":
         df = published.drop(columns=["_row", "published_by", "published_at"], errors="ignore")
 elif st.session_state.get("use_mock", True) or "dhis2_client" not in st.session_state:
     period = st.session_state.get("period", "2026Q3")
-    df = st.session_state.get("mock_df", get_mock_facility_data(period))
+    if "mock_df" in st.session_state:
+        df = st.session_state["mock_df"]
+    else:
+        # Nothing pulled yet this session (e.g. you just logged back in). Rather
+        # than jumping straight to unrelated demo data, recover your own last
+        # PUBLISHED analysis if you have one — this is the only thing from a
+        # previous session that's actually saved anywhere.
+        last_published = gsheets.get_published_achievement_data() if gsheets.is_configured() else pd.DataFrame()
+        if last_published is not None and not last_published.empty:
+            df = last_published.drop(columns=["_row", "published_by", "published_at"], errors="ignore")
+            pub_by = last_published["published_by"].iloc[0] if "published_by" in last_published.columns else "someone"
+            pub_at = last_published["published_at"].iloc[0] if "published_at" in last_published.columns else ""
+            st.info(f"Showing the last analysis published by **{pub_by}** ({pub_at}) — connect to DHIS2 "
+                      f"or load demo data below to start a fresh pull instead.")
+        else:
+            df = get_mock_facility_data(period)
 else:
     with st.expander("⚙️ Real DHIS2 pull settings", expanded=True):
         client = st.session_state["dhis2_client"]
