@@ -15,6 +15,10 @@ can_act = role in ("submitter", "admin")
 
 st.title("🏥 Facility Achievement Dashboard")
 
+# Data elements picked in the DHIS2 pull settings (available to the formula builder
+# even before you click Pull). Stays empty in demo/viewer mode.
+selected_de_names = []
+
 # ---------------------------------------------------------------------
 # Load data.
 # `viewer` users always see the shared, PUBLISHED analysis (from Google
@@ -93,6 +97,7 @@ else:
                 de_names = st.multiselect("Data elements", de_df["name"].tolist(),
                                             default=de_df["name"].tolist()[:5])
                 de_ids = de_df[de_df["name"].isin(de_names)]["id"].tolist()
+                selected_de_names = list(de_names)
 
                 # --- 3) Reporting period dropdown, generated from the dataset's periodType ---
                 period_options = generate_periods(period_type, count=12)
@@ -217,6 +222,121 @@ f_sel = col1.multiselect("Filter facilities", facilities, default=facilities)
 e_sel = col2.multiselect("Filter data elements", elements, default=elements)
 view = df[df["facility"].isin(f_sel) & df["data_element"].isin(e_sel)]
 
+# --- Calculated fields: build from searchable data elements -------------
+# Placed right under the data element filters so a new field can be defined
+# and seen immediately. Pick elements from a searchable list instead of typing
+# names by hand; the formula box stays editable and is validated as you go.
+def _calc_insert_element():
+    el = st.session_state.get("calc_pick")
+    if el:
+        cur = st.session_state.get("calc_formula", "").rstrip()
+        st.session_state["calc_formula"] = f"{cur} [{el}]".strip()
+
+
+def _calc_insert_op(op):
+    cur = st.session_state.get("calc_formula", "").rstrip()
+    st.session_state["calc_formula"] = f"{cur} {op}".strip()
+
+
+def _calc_clear():
+    st.session_state["calc_formula"] = ""
+    st.session_state["calc_name"] = ""
+
+
+def _calc_add(universe):
+    name = st.session_state.get("calc_name", "").strip()
+    formula = st.session_state.get("calc_formula", "").strip()
+    if not name or not formula:
+        st.session_state["calc_msg"] = ("error", "Both a name and a formula are required.")
+        return
+    if name in universe:
+        st.session_state["calc_msg"] = ("error", "That name collides with an existing data element — pick a different name.")
+        return
+    try:
+        formulas.validate_formula(formula, set(universe))
+        gsheets.save_calculated_field(name, formula, st.session_state["user"]["display_name"])
+        st.session_state["calc_msg"] = ("success", f"Added calculated field \"{name}\".")
+        st.session_state["calc_formula"] = ""
+        st.session_state["calc_name"] = ""
+    except formulas.FormulaError as e:
+        st.session_state["calc_msg"] = ("error", f"Formula error: {e}")
+    except RuntimeError as e:
+        st.session_state["calc_msg"] = ("error", f"Couldn't save: {e}")
+
+
+_calc_existing = set(calc_fields["name"]) if calc_fields is not None and not calc_fields.empty else set()
+raw_elements = (set(df["data_element"].unique()) - _calc_existing) if not df.empty else set()
+formula_universe = raw_elements | set(selected_de_names)
+
+with st.expander("🧮 Calculated fields — build a new field from your data elements", expanded=True):
+    _msg = st.session_state.pop("calc_msg", None)
+    if _msg:
+        (st.success if _msg[0] == "success" else st.error)(_msg[1])
+
+    if calc_fields is not None and not calc_fields.empty:
+        st.markdown("**Existing calculated fields** (already included in the filters, targets and charts):")
+        for _, cf in calc_fields.iterrows():
+            fc1, fc2 = st.columns([6, 1])
+            fc1.markdown(f"**{cf['name']}** = `{cf['formula']}`")
+            if can_act and fc2.button("🗑️", key=f"del_calc_{cf['name']}", help="Delete this calculated field"):
+                try:
+                    gsheets.delete_calculated_field(cf["name"])
+                    st.rerun()
+                except RuntimeError as e:
+                    st.error(f"Couldn't delete: {e}")
+
+    if not can_act:
+        st.info("Your role (`viewer`) can see calculated fields but not add or remove them.")
+    elif not formula_universe:
+        st.info("No data elements available yet — load data first, then build a calculated field here.")
+    else:
+        st.markdown("**Add a calculated field**")
+        st.text_input("Field name", key="calc_name", placeholder="e.g. DPT3 Coverage Ratio")
+
+        pc1, pc2 = st.columns([5, 1], vertical_alignment="bottom")
+        pc1.selectbox("🔍 Search a data element (type to filter), then click Insert",
+                       sorted(formula_universe), index=None, key="calc_pick",
+                       placeholder="Start typing a data element name…")
+        pc2.button("➕ Insert", on_click=_calc_insert_element, use_container_width=True)
+
+        oc = st.columns(7)
+        for col, (label, op) in zip(oc[:6], [("＋", "+"), ("−", "-"), ("×", "*"), ("÷", "/"), ("(", "("), (")", ")")]):
+            col.button(label, key=f"calc_op_{op}", on_click=_calc_insert_op, args=(op,), use_container_width=True)
+        oc[6].button("Clear", key="calc_clear", on_click=_calc_clear, use_container_width=True)
+
+        st.text_input("Formula (built from the buttons above, or type it)", key="calc_formula",
+                       placeholder="[DPT3 Immunization] / [ANC 4th visit] * 100")
+
+        _f = st.session_state.get("calc_formula", "").strip()
+        _valid = False
+        if _f:
+            try:
+                formulas.validate_formula(_f, formula_universe)
+                _valid = True
+                _refs = formulas.extract_referenced_elements(_f)
+                _missing = [r for r in _refs if r not in raw_elements]
+                if _missing:
+                    st.info("✅ Formula is valid. Values will appear once you pull data that includes: "
+                              + ", ".join(f"`{m}`" for m in _missing))
+                else:
+                    _piv = df[df["data_element"].isin(raw_elements)].pivot_table(
+                        index="facility", columns="data_element", values="actual", aggfunc="mean")
+                    _rows = []
+                    for _fac in _piv.index[:8]:
+                        try:
+                            _v = formulas.evaluate_formula(_f, raw_elements, _piv.loc[_fac].to_dict())
+                        except formulas.FormulaError:
+                            _v = float("nan")
+                        _rows.append({"facility": _fac, "value": round(_v, 2) if pd.notna(_v) else None})
+                    st.caption("✅ Formula is valid — live preview (first facilities):")
+                    st.dataframe(pd.DataFrame(_rows), hide_index=True, use_container_width=True)
+            except formulas.FormulaError as e:
+                st.error(f"Formula problem: {e}")
+
+        st.button("➕ Add calculated field", type="primary", key="calc_add",
+                   on_click=_calc_add, args=(frozenset(formula_universe),),
+                   disabled=not (_valid and st.session_state.get("calc_name", "").strip()))
+
 # --- Targets: download a template, then apply it whenever you're ready --
 st.divider()
 with st.expander("🎯 Targets — download a template, fill it in, then apply it here", expanded=True):
@@ -292,55 +412,6 @@ with st.expander("🎯 Targets — download a template, fill it in, then apply i
     if manual_targets is not None and not manual_targets.empty:
         st.caption(f"Currently saved: targets set for {len(manual_targets)} facility × data element "
                     f"row(s) — persisted in Google Sheets, not just this session.")
-
-# --- Calculated fields: define + manage ---------------------------------
-with st.expander("🧮 Calculated fields — derive a new field from existing data elements", expanded=False):
-    st.markdown(
-        "Define a new field as a formula over existing data elements, referenced by exact name "
-        "in `[square brackets]`, e.g. `[DPT3 Immunization] / [ANC 4th visit] * 100`. It's "
-        "recomputed per facility and behaves like any other data element afterward — including "
-        "getting its own target via the Targets section above."
-    )
-    _calc_names = set(calc_fields["name"]) if calc_fields is not None and not calc_fields.empty else set()
-    raw_elements = set(df["data_element"].unique()) - _calc_names if not df.empty else set()
-    if raw_elements:
-        st.caption("Available to reference: " + ", ".join(f"`{e}`" for e in sorted(raw_elements)))
-
-    if calc_fields is not None and not calc_fields.empty:
-        st.markdown("**Existing calculated fields:**")
-        for _, cf in calc_fields.iterrows():
-            fc1, fc2 = st.columns([5, 1])
-            fc1.markdown(f"**{cf['name']}** = `{cf['formula']}`")
-            if can_act and fc2.button("🗑️", key=f"del_calc_{cf['name']}", help="Delete this calculated field"):
-                try:
-                    gsheets.delete_calculated_field(cf["name"])
-                    st.rerun()
-                except RuntimeError as e:
-                    st.error(f"Couldn't delete: {e}")
-
-    if can_act:
-        with st.form("add_calc_field"):
-            cf_name = st.text_input("Field name", placeholder="e.g. DPT3 Coverage Ratio")
-            cf_formula = st.text_input("Formula", placeholder="[DPT3 Immunization] / [ANC 4th visit] * 100")
-            cf_submit = st.form_submit_button("➕ Add calculated field", type="primary")
-        if cf_submit:
-            if not cf_name.strip() or not cf_formula.strip():
-                st.error("Both a name and a formula are required.")
-            elif cf_name.strip() in raw_elements:
-                st.error("That name collides with an existing data element — pick a different name.")
-            else:
-                try:
-                    formulas.validate_formula(cf_formula, raw_elements)
-                    gsheets.save_calculated_field(cf_name.strip(), cf_formula.strip(),
-                                                    st.session_state["user"]["display_name"])
-                    st.success(f"Added calculated field \"{cf_name.strip()}\".")
-                    st.rerun()
-                except formulas.FormulaError as e:
-                    st.error(f"Formula error: {e}")
-                except RuntimeError as e:
-                    st.error(f"Couldn't save: {e}")
-    else:
-        st.info("Your role (`viewer`) can see calculated fields but not add or remove them.")
 
 # --- Publish: share this analysis with everyone, including viewers -----
 if can_act:
