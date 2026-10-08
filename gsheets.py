@@ -52,6 +52,7 @@ SHEET_COLUMNS = {
     "AchievementData": ["facility", "data_element", "period", "actual", "target",
                           "achievement_pct", "published_by", "published_at"],
     "Targets": ["facility", "data_element", "target", "updated_by", "updated_at"],
+    "CalculatedFields": ["name", "formula", "created_by", "created_at"],
 }
 
 
@@ -274,6 +275,43 @@ def clear_targets():
     ws = _get_or_create_ws("Targets")
     _wrap_gspread_errors(ws.clear)()
     _wrap_gspread_errors(ws.append_row)(SHEET_COLUMNS["Targets"])
+    get_all.clear()
+
+
+# ---------------------------------------------------------------------
+# Calculated fields — definitions (name + formula) persisted and shared.
+# ---------------------------------------------------------------------
+def get_calculated_fields() -> pd.DataFrame:
+    df = get_all("CalculatedFields")
+    if not df.empty:
+        df = df.drop(columns=["_row"], errors="ignore")
+    return df
+
+
+def save_calculated_field(name: str, formula: str, created_by: str):
+    """Upsert by name — redefining a calculated field replaces its formula."""
+    cols = SHEET_COLUMNS["CalculatedFields"]
+    existing = get_calculated_fields()
+    new_row = pd.DataFrame([{"name": name, "formula": formula, "created_by": created_by,
+                             "created_at": datetime.now().isoformat(timespec="seconds")}])
+    combined = new_row if existing.empty else (
+        pd.concat([existing, new_row], ignore_index=True).drop_duplicates(subset=["name"], keep="last"))
+    combined = combined[cols].fillna("")
+    ws = _get_or_create_ws("CalculatedFields")
+    _wrap_gspread_errors(ws.clear)()
+    _wrap_gspread_errors(ws.update)([cols] + combined.astype(str).values.tolist())
+    get_all.clear()
+
+
+def delete_calculated_field(name: str):
+    existing = get_calculated_fields()
+    if existing.empty:
+        return
+    cols = SHEET_COLUMNS["CalculatedFields"]
+    remaining = existing[existing["name"] != name]
+    ws = _get_or_create_ws("CalculatedFields")
+    _wrap_gspread_errors(ws.clear)()
+    _wrap_gspread_errors(ws.update)([cols] + remaining[cols].astype(str).values.tolist())
     get_all.clear()
 
 

@@ -5,6 +5,7 @@ import plotly.express as px
 import plotly.graph_objects as go
 import auth
 import gsheets
+import formulas
 from dhis2_client import get_mock_facility_data, generate_periods
 
 auth.require_login()
@@ -160,6 +161,39 @@ else:
     df = st.session_state.get("live_df", get_mock_facility_data(st.session_state.get("period", "2026Q3")))
 
 # ---------------------------------------------------------------------
+# Calculated fields — persisted formula definitions, e.g.
+# "[DPT3 Immunization] / [ANC 4th visit] * 100", recomputed per facility
+# from the raw data loaded and added as extra rows, so filters, targets and
+# publishing treat them like any other data element. Skipped for `viewer`
+# (their published analysis already contains the calculated rows, targets
+# included) and for any field whose raw inputs aren't in the data loaded.
+# ---------------------------------------------------------------------
+calc_fields = gsheets.get_calculated_fields() if gsheets.is_configured() else pd.DataFrame()
+if role != "viewer" and calc_fields is not None and not calc_fields.empty and not df.empty:
+    calc_names = set(calc_fields["name"])
+    raw_available = set(df["data_element"].unique()) - calc_names
+    pivot_actual = df[~df["data_element"].isin(calc_names)].pivot_table(
+        index="facility", columns="data_element", values="actual", aggfunc="mean")
+    period_val = df["period"].iloc[0] if "period" in df.columns else ""
+    new_calc_rows, recomputed = [], set()
+    for _, cf in calc_fields.iterrows():
+        if not set(formulas.extract_referenced_elements(cf["formula"])) <= raw_available:
+            continue  # inputs not present in this dataset — leave any existing rows alone
+        recomputed.add(cf["name"])
+        for facility_name in pivot_actual.index:
+            try:
+                value = formulas.evaluate_formula(cf["formula"], raw_available,
+                                                  pivot_actual.loc[facility_name].to_dict())
+            except formulas.FormulaError:
+                value = float("nan")
+            new_calc_rows.append({"facility": facility_name, "data_element": cf["name"],
+                                  "period": period_val, "actual": value,
+                                  "target": pd.NA, "achievement_pct": pd.NA})
+    if new_calc_rows:
+        df = df[~df["data_element"].isin(recomputed)]
+        df = pd.concat([df, pd.DataFrame(new_calc_rows)], ignore_index=True)
+
+# ---------------------------------------------------------------------
 # Apply persisted targets — stored in Google Sheets (not just this
 # session), so they survive logout/reboot and are shared across whoever's
 # working on the analysis. Independent of mock vs. live DHIS2 and of
@@ -258,6 +292,55 @@ with st.expander("🎯 Targets — download a template, fill it in, then apply i
     if manual_targets is not None and not manual_targets.empty:
         st.caption(f"Currently saved: targets set for {len(manual_targets)} facility × data element "
                     f"row(s) — persisted in Google Sheets, not just this session.")
+
+# --- Calculated fields: define + manage ---------------------------------
+with st.expander("🧮 Calculated fields — derive a new field from existing data elements", expanded=False):
+    st.markdown(
+        "Define a new field as a formula over existing data elements, referenced by exact name "
+        "in `[square brackets]`, e.g. `[DPT3 Immunization] / [ANC 4th visit] * 100`. It's "
+        "recomputed per facility and behaves like any other data element afterward — including "
+        "getting its own target via the Targets section above."
+    )
+    _calc_names = set(calc_fields["name"]) if calc_fields is not None and not calc_fields.empty else set()
+    raw_elements = set(df["data_element"].unique()) - _calc_names if not df.empty else set()
+    if raw_elements:
+        st.caption("Available to reference: " + ", ".join(f"`{e}`" for e in sorted(raw_elements)))
+
+    if calc_fields is not None and not calc_fields.empty:
+        st.markdown("**Existing calculated fields:**")
+        for _, cf in calc_fields.iterrows():
+            fc1, fc2 = st.columns([5, 1])
+            fc1.markdown(f"**{cf['name']}** = `{cf['formula']}`")
+            if can_act and fc2.button("🗑️", key=f"del_calc_{cf['name']}", help="Delete this calculated field"):
+                try:
+                    gsheets.delete_calculated_field(cf["name"])
+                    st.rerun()
+                except RuntimeError as e:
+                    st.error(f"Couldn't delete: {e}")
+
+    if can_act:
+        with st.form("add_calc_field"):
+            cf_name = st.text_input("Field name", placeholder="e.g. DPT3 Coverage Ratio")
+            cf_formula = st.text_input("Formula", placeholder="[DPT3 Immunization] / [ANC 4th visit] * 100")
+            cf_submit = st.form_submit_button("➕ Add calculated field", type="primary")
+        if cf_submit:
+            if not cf_name.strip() or not cf_formula.strip():
+                st.error("Both a name and a formula are required.")
+            elif cf_name.strip() in raw_elements:
+                st.error("That name collides with an existing data element — pick a different name.")
+            else:
+                try:
+                    formulas.validate_formula(cf_formula, raw_elements)
+                    gsheets.save_calculated_field(cf_name.strip(), cf_formula.strip(),
+                                                    st.session_state["user"]["display_name"])
+                    st.success(f"Added calculated field \"{cf_name.strip()}\".")
+                    st.rerun()
+                except formulas.FormulaError as e:
+                    st.error(f"Formula error: {e}")
+                except RuntimeError as e:
+                    st.error(f"Couldn't save: {e}")
+    else:
+        st.info("Your role (`viewer`) can see calculated fields but not add or remove them.")
 
 # --- Publish: share this analysis with everyone, including viewers -----
 if can_act:
