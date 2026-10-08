@@ -18,6 +18,155 @@ st.title("🏥 Facility Achievement Dashboard")
 # Data elements picked in the DHIS2 pull settings (available to the formula builder
 # even before you click Pull). Stays empty in demo/viewer mode.
 selected_de_names = []
+in_live_branch = False         # True once the DHIS2 pull settings are showing
+calc_builder_rendered = False  # builder is drawn in the pull settings (live) OR under the filters
+
+# Calculated-field definitions (shared, persisted). Loaded up here so the formula builder
+# can sit inside the DHIS2 pull settings, before the reporting period.
+calc_fields = gsheets.get_calculated_fields() if gsheets.is_configured() else pd.DataFrame()
+
+
+def fetch_all_data_elements(client) -> pd.DataFrame:
+    """Every aggregate data element in the DHIS2 instance (id, name) — across ALL
+    datasets, not just the one selected — so a calculated field can combine elements
+    that belong to different datasets."""
+    try:
+        r = requests.get(f"{client.base_url}/api/dataElements.json",
+                          params={"fields": "id,name", "filter": "domainType:eq:AGGREGATE", "paging": "false"},
+                          auth=client.auth, timeout=60)
+    except requests.RequestException as e:
+        raise RuntimeError(f"Couldn't reach DHIS2: {e}")
+    if not r.ok:
+        try:
+            detail = r.json().get("message", r.text)
+        except ValueError:
+            detail = r.text
+        raise RuntimeError(f"DHIS2 request failed ({r.status_code}): {detail}")
+    return pd.DataFrame(r.json().get("dataElements", []), columns=["id", "name"]).sort_values("name")
+
+
+def _calc_insert_element():
+    el = st.session_state.get("calc_pick")
+    if el:
+        cur = st.session_state.get("calc_formula", "").rstrip()
+        st.session_state["calc_formula"] = f"{cur} [{el}]".strip()
+
+
+def _calc_insert_op(op):
+    cur = st.session_state.get("calc_formula", "").rstrip()
+    st.session_state["calc_formula"] = f"{cur} {op}".strip()
+
+
+def _calc_clear():
+    st.session_state["calc_formula"] = ""
+    st.session_state["calc_name"] = ""
+
+
+def _calc_add(universe):
+    name = st.session_state.get("calc_name", "").strip()
+    formula = st.session_state.get("calc_formula", "").strip()
+    if not name or not formula:
+        st.session_state["calc_msg"] = ("error", "Both a name and a formula are required.")
+        return
+    if name in universe:
+        st.session_state["calc_msg"] = ("error", "That name collides with an existing data element — pick a different name.")
+        return
+    try:
+        formulas.validate_formula(formula, set(universe))
+        gsheets.save_calculated_field(name, formula, st.session_state["user"]["display_name"])
+        st.session_state["calc_msg"] = ("success", f"Added calculated field \"{name}\".")
+        st.session_state["calc_formula"] = ""
+        st.session_state["calc_name"] = ""
+    except formulas.FormulaError as e:
+        st.session_state["calc_msg"] = ("error", f"Formula error: {e}")
+    except RuntimeError as e:
+        st.session_state["calc_msg"] = ("error", f"Couldn't save: {e}")
+
+
+def render_calc_builder(extra_names, preview_df, inline=False):
+    """Searchable formula builder.
+    extra_names: element names that can be referenced even if they aren't in the loaded
+                 data (e.g. every element in DHIS2, or ones ticked but not yet pulled).
+    preview_df:  data currently loaded (or None) — drives the live preview.
+    inline:      True inside the pull settings (an expander can't nest inside an expander)."""
+    existing = set(calc_fields["name"]) if calc_fields is not None and not calc_fields.empty else set()
+    have_data = preview_df is not None and not preview_df.empty
+    raw_elements = (set(preview_df["data_element"].unique()) - existing) if have_data else set()
+    universe = (raw_elements | set(extra_names)) - existing
+
+    box = (st.container(border=True) if inline else
+           st.expander("🧮 Calculated fields — build a new field from your data elements", expanded=True))
+    with box:
+        if inline:
+            st.markdown("**🧮 Calculated fields** — build them from data elements of *any* dataset")
+        _msg = st.session_state.pop("calc_msg", None)
+        if _msg:
+            (st.success if _msg[0] == "success" else st.error)(_msg[1])
+
+        if calc_fields is not None and not calc_fields.empty:
+            st.markdown("**Existing calculated fields** (already included in the filters, targets and charts):")
+            for _, cf in calc_fields.iterrows():
+                fc1, fc2 = st.columns([6, 1])
+                fc1.markdown(f"**{cf['name']}** = `{cf['formula']}`")
+                if can_act and fc2.button("🗑️", key=f"del_calc_{cf['name']}", help="Delete this calculated field"):
+                    try:
+                        gsheets.delete_calculated_field(cf["name"])
+                        st.rerun()
+                    except RuntimeError as e:
+                        st.error(f"Couldn't delete: {e}")
+
+        if not can_act:
+            st.info("Your role (`viewer`) can see calculated fields but not add or remove them.")
+        elif not universe:
+            st.info("No data elements available yet — load data first, then build a calculated field here.")
+        else:
+            st.markdown("**Add a calculated field**")
+            st.text_input("Field name", key="calc_name", placeholder="e.g. DPT3 Coverage Ratio")
+
+            pc1, pc2 = st.columns([5, 1], vertical_alignment="bottom")
+            pc1.selectbox("🔍 Search a data element (type to filter), then click Insert",
+                           sorted(universe), index=None, key="calc_pick",
+                           placeholder="Start typing a data element name…")
+            pc2.button("➕ Insert", on_click=_calc_insert_element, use_container_width=True)
+
+            oc = st.columns(7)
+            for col, (label, op) in zip(oc[:6], [("＋", "+"), ("−", "-"), ("×", "*"), ("÷", "/"), ("(", "("), (")", ")")]):
+                col.button(label, key=f"calc_op_{op}", on_click=_calc_insert_op, args=(op,), use_container_width=True)
+            oc[6].button("Clear", key="calc_clear", on_click=_calc_clear, use_container_width=True)
+
+            st.text_input("Formula (built from the buttons above, or type it)", key="calc_formula",
+                           placeholder="[DPT3 Immunization] / [ANC 4th visit] * 100")
+
+            _f = st.session_state.get("calc_formula", "").strip()
+            _valid = False
+            if _f:
+                try:
+                    formulas.validate_formula(_f, universe)
+                    _valid = True
+                    _refs = formulas.extract_referenced_elements(_f)
+                    _missing = [r for r in _refs if r not in raw_elements]
+                    if _missing:
+                        st.info("✅ Formula is valid. Values will appear once you pull data that includes: "
+                                  + ", ".join(f"`{m}`" for m in _missing))
+                    else:
+                        _piv = preview_df[preview_df["data_element"].isin(raw_elements)].pivot_table(
+                            index="facility", columns="data_element", values="actual", aggfunc="mean")
+                        _rows = []
+                        for _fac in _piv.index[:8]:
+                            try:
+                                _v = formulas.evaluate_formula(_f, raw_elements, _piv.loc[_fac].to_dict())
+                            except formulas.FormulaError:
+                                _v = float("nan")
+                            _rows.append({"facility": _fac, "value": round(_v, 2) if pd.notna(_v) else None})
+                        st.caption("✅ Formula is valid — live preview (first facilities):")
+                        st.dataframe(pd.DataFrame(_rows), hide_index=True, use_container_width=True)
+                except formulas.FormulaError as e:
+                    st.error(f"Formula problem: {e}")
+
+            st.button("➕ Add calculated field", type="primary", key="calc_add",
+                       on_click=_calc_add, args=(frozenset(universe),),
+                       disabled=not (_valid and st.session_state.get("calc_name", "").strip()))
+
 
 # ---------------------------------------------------------------------
 # Load data.
@@ -61,6 +210,7 @@ elif st.session_state.get("use_mock", True) or "dhis2_client" not in st.session_
         else:
             df = get_mock_facility_data(period)
 else:
+    in_live_branch = True
     with st.expander("⚙️ Real DHIS2 pull settings", expanded=True):
         client = st.session_state["dhis2_client"]
 
@@ -99,13 +249,66 @@ else:
                 de_ids = de_df[de_df["name"].isin(de_names)]["id"].tolist()
                 selected_de_names = list(de_names)
 
-                # --- 3) Reporting period dropdown, generated from the dataset's periodType ---
-                period_options = generate_periods(period_type, count=12)
-                period_label = st.selectbox(
-                    "Reporting period", [p[0] for p in period_options],
-                    help=f"Periods generated for this dataset's period type: {period_type}"
+                # --- 2b) Calculated fields — inputs can come from ANY dataset ---------------
+                all_el = st.session_state.get("dhis2_all_elements")
+                if all_el is None:
+                    try:
+                        with st.spinner("Loading data elements from all datasets..."):
+                            all_el = fetch_all_data_elements(client)
+                    except RuntimeError as e:
+                        all_el = pd.DataFrame(columns=["id", "name"])
+                        st.session_state["dhis2_all_elements_err"] = str(e)
+                    st.session_state["dhis2_all_elements"] = all_el
+                if st.session_state.get("dhis2_all_elements_err"):
+                    st.warning("Couldn't load data elements from all datasets, so the formula picker only "
+                                f"offers this dataset's elements for now: {st.session_state['dhis2_all_elements_err']}")
+                    if st.button("↻ Retry loading all data elements"):
+                        st.session_state.pop("dhis2_all_elements", None)
+                        st.session_state.pop("dhis2_all_elements_err", None)
+                        st.rerun()
+                render_calc_builder(extra_names=set(all_el["name"]) | set(selected_de_names),
+                                     preview_df=st.session_state.get("live_df"), inline=True)
+                calc_builder_rendered = True
+
+                # Inputs of saved calculated fields get pulled too, even from other datasets
+                name_to_id = dict(zip(all_el["name"], all_el["id"]))
+                name_to_id.update(dict(zip(de_df["name"], de_df["id"])))
+                id_to_name = {v: k for k, v in name_to_id.items()}
+                calc_input_ids, calc_unresolved = [], set()
+                if calc_fields is not None and not calc_fields.empty:
+                    for _, _cf in calc_fields.iterrows():
+                        for _nm in formulas.extract_referenced_elements(_cf["formula"]):
+                            if _nm in name_to_id:
+                                calc_input_ids.append(name_to_id[_nm])
+                            else:
+                                calc_unresolved.add(_nm)
+                pull_ids = list(dict.fromkeys(list(de_ids) + calc_input_ids))
+                helper_ids = [i for i in pull_ids if i not in set(de_ids)]
+
+                # --- 3) Reporting period(s), generated from the dataset's periodType ---
+                period_options = generate_periods(period_type, count=24)
+                period_labels = [p[0] for p in period_options]
+                sel_labels = st.multiselect(
+                    "Reporting period(s)", period_labels, default=period_labels[:1],
+                    help=f"Periods generated for this dataset's period type: {period_type}. "
+                         "Select several to combine them (e.g. three months for a quarter)."
                 )
-                period_code = dict(period_options)[period_label]
+                code_by_label = dict(period_options)
+                ordered_labels = [l for l in reversed(period_labels) if l in sel_labels]  # oldest first
+                period_codes = [code_by_label[l] for l in ordered_labels]
+                combine_mode = "Sum"
+                if len(period_codes) > 1:
+                    combine_mode = st.radio("Combine the selected periods by", ["Sum", "Average"], horizontal=True,
+                                              help="Sum suits counts (cases, visits). Average suits rates or "
+                                                   "percentages. Calculated fields are computed AFTER combining.")
+                if not period_codes:
+                    period_text = ""
+                elif len(period_codes) == 1:
+                    period_text = period_codes[0]
+                elif len(period_codes) <= 3:
+                    period_text = " + ".join(period_codes) + f" ({combine_mode.lower()})"
+                else:
+                    period_text = f"{period_codes[0]} … {period_codes[-1]} ({len(period_codes)} periods, {combine_mode.lower()})"
 
                 # --- 4) Org unit dropdown, multi-select ------------------------
                 ou_level = st.number_input("Org unit level (1=country, 4=typical facility level)",
@@ -139,10 +342,19 @@ else:
                     ou_ids = []
                     st.caption("Click \"Load org units at this level\" above to pick facilities.")
 
-                if st.button("Pull from DHIS2", type="primary") and de_ids and ou_ids:
+                if helper_ids:
+                    st.caption(f"➕ {len(helper_ids)} extra data element(s) will also be pulled because your "
+                                "calculated fields use them (hidden from the dashboard by default).")
+                if calc_unresolved:
+                    st.warning("These calculated-field inputs weren't found in DHIS2, so those fields can't be "
+                                "calculated: " + ", ".join(f"`{n}`" for n in sorted(calc_unresolved)))
+                pull_clicked = st.button("Pull from DHIS2", type="primary")
+                if pull_clicked and not (pull_ids and ou_ids and period_codes):
+                    st.warning("Pick at least one data element, one org unit and one reporting period first.")
+                if pull_clicked and pull_ids and ou_ids and period_codes:
                     try:
                         with st.spinner("Pulling analytics from DHIS2..."):
-                            raw = client.get_analytics(de_ids, ";".join(ou_ids), period_code)
+                            raw = client.get_analytics(pull_ids, ";".join(ou_ids), ";".join(period_codes))
                     except RuntimeError as e:
                         st.error(str(e))
                         st.info("Common fixes: double-check the org unit UID is correct and that your "
@@ -150,17 +362,24 @@ else:
                                   "generated for this period on your DHIS2 instance.")
                         st.stop()
                     df_pulled = raw.rename(columns={"value": "actual"})
+                    if len(period_codes) > 1:
+                        # One row per facility × data element across the selected periods.
+                        grp = df_pulled.groupby(["facility", "data_element"], as_index=False)["actual"]
+                        df_pulled = grp.sum(min_count=1) if combine_mode == "Sum" else grp.mean()
+                        df_pulled["period"] = period_text
                     df_pulled["target"] = pd.NA
                     df_pulled["achievement_pct"] = pd.NA
                     st.session_state["live_df"] = df_pulled
-                    st.session_state["period"] = period_code
+                    st.session_state["period"] = period_text
+                    st.session_state["helper_elements"] = [id_to_name[i] for i in helper_ids if i in id_to_name]
                     st.info("Data pulled. Scroll down to \"🎯 Apply your own targets\" to add targets and see "
                               "achievement %.")
 
                 if st.button("↻ Refresh dataset/data element/org unit lists"):
                     for k in list(st.session_state.keys()):
                         if (k == "dhis2_datasets" or k.startswith("dhis2_elements_")
-                                or k.startswith("dhis2_orgunits_")):
+                                or k.startswith("dhis2_orgunits_")
+                                or k in ("dhis2_all_elements", "dhis2_all_elements_err")):
                             del st.session_state[k]
                     st.rerun()
     df = st.session_state.get("live_df", get_mock_facility_data(st.session_state.get("period", "2026Q3")))
@@ -173,7 +392,6 @@ else:
 # (their published analysis already contains the calculated rows, targets
 # included) and for any field whose raw inputs aren't in the data loaded.
 # ---------------------------------------------------------------------
-calc_fields = gsheets.get_calculated_fields() if gsheets.is_configured() else pd.DataFrame()
 if role != "viewer" and calc_fields is not None and not calc_fields.empty and not df.empty:
     calc_names = set(calc_fields["name"])
     raw_available = set(df["data_element"].unique()) - calc_names
@@ -219,123 +437,18 @@ col1, col2 = st.columns(2)
 facilities = sorted(df["facility"].unique())
 elements = sorted(df["data_element"].unique())
 f_sel = col1.multiselect("Filter facilities", facilities, default=facilities)
-e_sel = col2.multiselect("Filter data elements", elements, default=elements)
+_hidden = set(st.session_state.get("helper_elements", [])) if in_live_branch else set()
+e_sel = col2.multiselect(
+    "Filter data elements", elements, default=[e for e in elements if e not in _hidden],
+    help=("Elements pulled only to feed calculated fields are hidden by default — add them here to see them."
+          if _hidden & set(elements) else None))
 view = df[df["facility"].isin(f_sel) & df["data_element"].isin(e_sel)]
 
-# --- Calculated fields: build from searchable data elements -------------
-# Placed right under the data element filters so a new field can be defined
-# and seen immediately. Pick elements from a searchable list instead of typing
-# names by hand; the formula box stays editable and is validated as you go.
-def _calc_insert_element():
-    el = st.session_state.get("calc_pick")
-    if el:
-        cur = st.session_state.get("calc_formula", "").rstrip()
-        st.session_state["calc_formula"] = f"{cur} [{el}]".strip()
-
-
-def _calc_insert_op(op):
-    cur = st.session_state.get("calc_formula", "").rstrip()
-    st.session_state["calc_formula"] = f"{cur} {op}".strip()
-
-
-def _calc_clear():
-    st.session_state["calc_formula"] = ""
-    st.session_state["calc_name"] = ""
-
-
-def _calc_add(universe):
-    name = st.session_state.get("calc_name", "").strip()
-    formula = st.session_state.get("calc_formula", "").strip()
-    if not name or not formula:
-        st.session_state["calc_msg"] = ("error", "Both a name and a formula are required.")
-        return
-    if name in universe:
-        st.session_state["calc_msg"] = ("error", "That name collides with an existing data element — pick a different name.")
-        return
-    try:
-        formulas.validate_formula(formula, set(universe))
-        gsheets.save_calculated_field(name, formula, st.session_state["user"]["display_name"])
-        st.session_state["calc_msg"] = ("success", f"Added calculated field \"{name}\".")
-        st.session_state["calc_formula"] = ""
-        st.session_state["calc_name"] = ""
-    except formulas.FormulaError as e:
-        st.session_state["calc_msg"] = ("error", f"Formula error: {e}")
-    except RuntimeError as e:
-        st.session_state["calc_msg"] = ("error", f"Couldn't save: {e}")
-
-
-_calc_existing = set(calc_fields["name"]) if calc_fields is not None and not calc_fields.empty else set()
-raw_elements = (set(df["data_element"].unique()) - _calc_existing) if not df.empty else set()
-formula_universe = raw_elements | set(selected_de_names)
-
-with st.expander("🧮 Calculated fields — build a new field from your data elements", expanded=True):
-    _msg = st.session_state.pop("calc_msg", None)
-    if _msg:
-        (st.success if _msg[0] == "success" else st.error)(_msg[1])
-
-    if calc_fields is not None and not calc_fields.empty:
-        st.markdown("**Existing calculated fields** (already included in the filters, targets and charts):")
-        for _, cf in calc_fields.iterrows():
-            fc1, fc2 = st.columns([6, 1])
-            fc1.markdown(f"**{cf['name']}** = `{cf['formula']}`")
-            if can_act and fc2.button("🗑️", key=f"del_calc_{cf['name']}", help="Delete this calculated field"):
-                try:
-                    gsheets.delete_calculated_field(cf["name"])
-                    st.rerun()
-                except RuntimeError as e:
-                    st.error(f"Couldn't delete: {e}")
-
-    if not can_act:
-        st.info("Your role (`viewer`) can see calculated fields but not add or remove them.")
-    elif not formula_universe:
-        st.info("No data elements available yet — load data first, then build a calculated field here.")
-    else:
-        st.markdown("**Add a calculated field**")
-        st.text_input("Field name", key="calc_name", placeholder="e.g. DPT3 Coverage Ratio")
-
-        pc1, pc2 = st.columns([5, 1], vertical_alignment="bottom")
-        pc1.selectbox("🔍 Search a data element (type to filter), then click Insert",
-                       sorted(formula_universe), index=None, key="calc_pick",
-                       placeholder="Start typing a data element name…")
-        pc2.button("➕ Insert", on_click=_calc_insert_element, use_container_width=True)
-
-        oc = st.columns(7)
-        for col, (label, op) in zip(oc[:6], [("＋", "+"), ("−", "-"), ("×", "*"), ("÷", "/"), ("(", "("), (")", ")")]):
-            col.button(label, key=f"calc_op_{op}", on_click=_calc_insert_op, args=(op,), use_container_width=True)
-        oc[6].button("Clear", key="calc_clear", on_click=_calc_clear, use_container_width=True)
-
-        st.text_input("Formula (built from the buttons above, or type it)", key="calc_formula",
-                       placeholder="[DPT3 Immunization] / [ANC 4th visit] * 100")
-
-        _f = st.session_state.get("calc_formula", "").strip()
-        _valid = False
-        if _f:
-            try:
-                formulas.validate_formula(_f, formula_universe)
-                _valid = True
-                _refs = formulas.extract_referenced_elements(_f)
-                _missing = [r for r in _refs if r not in raw_elements]
-                if _missing:
-                    st.info("✅ Formula is valid. Values will appear once you pull data that includes: "
-                              + ", ".join(f"`{m}`" for m in _missing))
-                else:
-                    _piv = df[df["data_element"].isin(raw_elements)].pivot_table(
-                        index="facility", columns="data_element", values="actual", aggfunc="mean")
-                    _rows = []
-                    for _fac in _piv.index[:8]:
-                        try:
-                            _v = formulas.evaluate_formula(_f, raw_elements, _piv.loc[_fac].to_dict())
-                        except formulas.FormulaError:
-                            _v = float("nan")
-                        _rows.append({"facility": _fac, "value": round(_v, 2) if pd.notna(_v) else None})
-                    st.caption("✅ Formula is valid — live preview (first facilities):")
-                    st.dataframe(pd.DataFrame(_rows), hide_index=True, use_container_width=True)
-            except formulas.FormulaError as e:
-                st.error(f"Formula problem: {e}")
-
-        st.button("➕ Add calculated field", type="primary", key="calc_add",
-                   on_click=_calc_add, args=(frozenset(formula_universe),),
-                   disabled=not (_valid and st.session_state.get("calc_name", "").strip()))
+# --- Calculated fields (demo mode, or before DHIS2 datasets are loaded) -----
+# In live DHIS2 mode the builder lives inside the pull settings above, ahead of the
+# reporting period. Everywhere else it sits here, right under the data element filters.
+if not calc_builder_rendered:
+    render_calc_builder(extra_names=set(), preview_df=df)
 
 # --- Targets: download a template, then apply it whenever you're ready --
 st.divider()
