@@ -18,6 +18,10 @@ st.title("🏥 Facility Achievement Dashboard")
 # Data elements picked in the DHIS2 pull settings (available to the formula builder
 # even before you click Pull). Stays empty in demo/viewer mode.
 selected_de_names = []
+# DHIS2 period types, finest -> coarsest (used to pick a sensible default when datasets differ)
+PERIOD_TYPE_ORDER = ["Daily", "Weekly", "WeeklyWednesday", "WeeklyThursday", "WeeklySaturday", "WeeklySunday",
+                     "BiWeekly", "Monthly", "BiMonthly", "Quarterly", "SixMonthly", "SixMonthlyApril",
+                     "SixMonthlyNov", "Yearly", "FinancialApril", "FinancialJuly", "FinancialOct", "FinancialNov"]
 in_live_branch = False         # True once the DHIS2 pull settings are showing
 calc_builder_rendered = False  # builder is drawn in the pull settings (live) OR under the filters
 
@@ -229,23 +233,36 @@ else:
                 st.warning("No datasets returned — check your DHIS2 permissions.")
             else:
                 ds_names = ds_df["name"].tolist()
-                ds_name = st.selectbox("Dataset", ds_names, key="ds_name")
-                ds_row = ds_df[ds_df["name"] == ds_name].iloc[0]
-                dataset_id = ds_row["id"]
-                period_type = ds_row.get("periodType", "Monthly")
+                sel_ds_names = st.multiselect(
+                    "Dataset(s)", ds_names, default=ds_names[:1],
+                    help="Pick one or more datasets — you can combine data elements from several of them.")
+                sel_ds = ds_df[ds_df["name"].isin(sel_ds_names)]
+                if sel_ds.empty:
+                    st.info("Select at least one dataset to list its data elements.")
 
-                # --- 2) Data element dropdown, scoped to the chosen dataset ---
-                de_cache_key = f"dhis2_elements_{dataset_id}"
-                if de_cache_key not in st.session_state:
-                    try:
-                        with st.spinner("Fetching data elements for this dataset..."):
-                            st.session_state[de_cache_key] = client.get_dataset_elements(dataset_id)
-                    except RuntimeError as e:
-                        st.error(f"Couldn't load data elements for this dataset: {e}")
-                        st.stop()
-                de_df = st.session_state[de_cache_key]
-                de_names = st.multiselect("Data elements", de_df["name"].tolist(),
-                                            default=de_df["name"].tolist()[:5])
+                # --- 2) Data elements from ALL the selected datasets ----------------------
+                _frames, sources = [], {}
+                for _, _ds in sel_ds.iterrows():
+                    _key = f"dhis2_elements_{_ds['id']}"
+                    if _key not in st.session_state:
+                        try:
+                            with st.spinner(f"Fetching data elements for {_ds['name']}..."):
+                                st.session_state[_key] = client.get_dataset_elements(_ds["id"])
+                        except RuntimeError as e:
+                            st.error(f"Couldn't load data elements for {_ds['name']}: {e}")
+                            st.stop()
+                    _els = st.session_state[_key]
+                    _frames.append(_els)
+                    for _n in _els["name"]:
+                        sources.setdefault(_n, []).append(_ds["name"])
+                de_df = (pd.concat(_frames, ignore_index=True).drop_duplicates(subset="id")
+                         if _frames else pd.DataFrame(columns=["id", "name"]))
+                multi_ds = len(sel_ds) > 1
+                de_names = st.multiselect(
+                    "Data elements", de_df["name"].tolist(), default=de_df["name"].tolist()[:5],
+                    format_func=(lambda n: f"{n}  ·  {', '.join(sources.get(n, []))}") if multi_ds else str,
+                    help=("Showing the data elements of every selected dataset — the dataset each one "
+                          "belongs to is shown after the name." if multi_ds else None))
                 de_ids = de_df[de_df["name"].isin(de_names)]["id"].tolist()
                 selected_de_names = list(de_names)
 
@@ -286,11 +303,24 @@ else:
                 helper_ids = [i for i in pull_ids if i not in set(de_ids)]
 
                 # --- 3) Reporting period(s), generated from the dataset's periodType ---
+                types_present = (list(dict.fromkeys(sel_ds["periodType"].dropna().tolist()))
+                                  if "periodType" in sel_ds.columns else [])
+                if not types_present:
+                    types_present = ["Monthly"]
+                _rank = lambda t: PERIOD_TYPE_ORDER.index(t) if t in PERIOD_TYPE_ORDER else PERIOD_TYPE_ORDER.index("Monthly")
+                types_sorted = sorted(types_present, key=_rank)
+                period_type = types_sorted[-1]  # coarsest by default
+                if len(types_sorted) > 1:
+                    period_type = st.selectbox(
+                        "Period type for the reporting periods", types_sorted, index=len(types_sorted) - 1,
+                        help="Your datasets report at different frequencies. DHIS2 can roll monthly data up "
+                             "into quarterly or yearly periods, but not the other way round, so the coarsest "
+                             "type is selected by default.")
                 period_options = generate_periods(period_type, count=24)
                 period_labels = [p[0] for p in period_options]
                 sel_labels = st.multiselect(
                     "Reporting period(s)", period_labels, default=period_labels[:1],
-                    help=f"Periods generated for this dataset's period type: {period_type}. "
+                    help=f"Periods generated for the {period_type} period type. "
                          "Select several to combine them (e.g. three months for a quarter)."
                 )
                 code_by_label = dict(period_options)
