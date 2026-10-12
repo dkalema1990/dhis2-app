@@ -6,6 +6,7 @@ import plotly.graph_objects as go
 import auth
 import gsheets
 import formulas
+import kobo
 from dhis2_client import get_mock_facility_data, generate_periods
 
 auth.require_login()
@@ -749,15 +750,19 @@ for _, row in summary.iterrows():
                 st.switch_page(page)
 
             btn_type = lambda action: "primary" if action == rec else "secondary"
-            if a1.button(ACTION_LABELS["DQA"], key=f"dqa_{facility}", use_container_width=True,
-                          type=btn_type("DQA"), disabled=not can_act):
-                route("DQA", "pages/2_dqa_form.py")
-            if a2.button(ACTION_LABELS["SSM"], key=f"ssm_{facility}", use_container_width=True,
-                          type=btn_type("SSM"), disabled=not can_act):
-                route("SSM", "pages/3_support_supervision_form.py")
-            if a3.button(ACTION_LABELS["LV"], key=f"lv_{facility}", use_container_width=True,
-                          type=btn_type("LV"), disabled=not can_act):
-                route("LV", "pages/4_learning_visit_form.py")
+            # If a Kobo web-form link is configured for an activity, the button opens that form
+            # (facility / data element pre-filled); otherwise it opens the in-app form as before.
+            _kobo = {a: kobo.prefilled_link(a, facility, de_for_action, st.session_state.get("period"))
+                     for a in ("DQA", "SSM", "LV")}
+            for _col, _act, _page in ((a1, "DQA", "pages/2_dqa_form.py"),
+                                       (a2, "SSM", "pages/3_support_supervision_form.py"),
+                                       (a3, "LV", "pages/4_learning_visit_form.py")):
+                if _kobo[_act]:
+                    _col.link_button(ACTION_LABELS[_act] + " ↗", _kobo[_act], use_container_width=True,
+                                      type=btn_type(_act), disabled=not can_act)
+                elif _col.button(ACTION_LABELS[_act], key=f"{_act.lower()}_{facility}", use_container_width=True,
+                                  type=btn_type(_act), disabled=not can_act):
+                    route(_act, _page)
 
 st.caption("🔴 <50%   🟡 50–89%   🟢 ≥90% achievement  ·  highlighted button = system-recommended action "
             "(you can still pick any of the three)")

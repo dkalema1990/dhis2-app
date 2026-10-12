@@ -41,19 +41,23 @@ import streamlit as st
 SHEET_COLUMNS = {
     "DQA": ["facility", "data_element", "period", "reported_value", "verified_value",
             "discrepancy_reason", "root_cause", "corrective_action", "responsible_person",
-            "follow_up_date", "submitted_by", "timestamp", "pushed_to_dhis2"],
+            "follow_up_date", "submitted_by", "timestamp", "pushed_to_dhis2", "kobo_id"],
     "SSM": ["facility", "data_element", "focus_area", "findings", "mentorship_given",
             "score", "recommendations", "responsible_person", "follow_up_date",
-            "submitted_by", "timestamp"],
+            "submitted_by", "timestamp", "kobo_id"],
     "LV": ["facility", "data_element", "best_practice", "enabling_factors",
            "lessons_learned", "dissemination_plan", "responsible_person",
-           "follow_up_date", "submitted_by", "timestamp"],
+           "follow_up_date", "submitted_by", "timestamp", "kobo_id"],
     "Users": ["username", "password_hash", "role", "display_name"],
     "AchievementData": ["facility", "data_element", "period", "actual", "target",
                           "achievement_pct", "published_by", "published_at"],
     "Targets": ["facility", "data_element", "target", "updated_by", "updated_at"],
     "CalculatedFields": ["name", "formula", "created_by", "created_at"],
+    "KoboDeleted": ["sheet", "kobo_id", "deleted_by", "deleted_at"],
 }
+
+# Tabs that can receive Kobo submissions (each has a trailing `kobo_id` column)
+KOBO_SHEETS = ("DQA", "SSM", "LV")
 
 
 def is_configured() -> bool:
@@ -184,6 +188,19 @@ def update_record(sheet: str, row: int, record: dict):
 
 def delete_record(sheet: str, row: int):
     ws = _get_or_create_ws(sheet)
+    if sheet in KOBO_SHEETS:
+        # If this row was imported from Kobo, remember its ID so a later sync doesn't re-import it.
+        kobo_id = ""
+        try:
+            idx = SHEET_COLUMNS[sheet].index("kobo_id")
+            vals = _wrap_gspread_errors(ws.row_values)(row)
+            kobo_id = str(vals[idx]).strip() if len(vals) > idx else ""
+        except RuntimeError:
+            pass
+        if kobo_id:
+            who = (st.session_state.get("user") or {}).get("display_name", "")
+            _wrap_gspread_errors(_get_or_create_ws("KoboDeleted").append_row)(
+                [sheet, kobo_id, who, datetime.now().isoformat(timespec="seconds")])
     _wrap_gspread_errors(ws.delete_rows)(row)
     get_all.clear()
 
@@ -313,6 +330,58 @@ def delete_calculated_field(name: str):
     _wrap_gspread_errors(ws.clear)()
     _wrap_gspread_errors(ws.update)([cols] + remaining[cols].astype(str).values.tolist())
     get_all.clear()
+
+
+# ---------------------------------------------------------------------
+# Kobo support: bulk import, duplicate protection, header upgrade
+# ---------------------------------------------------------------------
+def ensure_kobo_columns():
+    """Tabs created before Kobo support lack the trailing `kobo_id` column. Add the header
+    in place (existing rows are untouched). Refuses if the header was customised, rather
+    than guessing."""
+    for sheet in KOBO_SHEETS:
+        ws = _get_or_create_ws(sheet)
+        expected = SHEET_COLUMNS[sheet]
+        header = _wrap_gspread_errors(ws.row_values)(1)
+        if header == expected:
+            continue
+        if header == expected[:len(header)]:
+            last = chr(ord("A") + len(expected) - 1)
+            _wrap_gspread_errors(ws.update)(range_name=f"A1:{last}1", values=[expected])
+        else:
+            raise RuntimeError(
+                f"The header row of the '{sheet}' tab doesn't match what the app expects, so it can't be "
+                f"upgraded automatically. Expected: {', '.join(expected)}")
+    get_all.clear()
+
+
+def get_kobo_ids(sheet: str) -> set:
+    """Kobo submission IDs already imported into this tab."""
+    df = get_all(sheet)
+    if df.empty or "kobo_id" not in df.columns:
+        return set()
+    return {str(v).strip() for v in df["kobo_id"] if str(v).strip()}
+
+
+def get_kobo_deleted_ids(sheet: str) -> set:
+    """Kobo IDs deleted in the app for this tab (these are skipped on every sync)."""
+    df = get_all("KoboDeleted")
+    if df.empty or "sheet" not in df.columns:
+        return set()
+    return {str(v).strip() for v in df.loc[df["sheet"] == sheet, "kobo_id"] if str(v).strip()}
+
+
+def append_kobo_rows(sheet: str, records: list, chunk: int = 500) -> int:
+    """Append many records in a few API calls (not one call per row)."""
+    if not records:
+        return 0
+    cols = SHEET_COLUMNS[sheet]
+    ws = _get_or_create_ws(sheet)
+    rows = [[str(r.get(c, "")) for c in cols] for r in records]
+    for i in range(0, len(rows), chunk):
+        _wrap_gspread_errors(ws.append_rows)(rows[i:i + chunk])
+    get_all.clear()
+    return len(rows)
 
 
 # Thin convenience wrappers so the form pages read naturally
