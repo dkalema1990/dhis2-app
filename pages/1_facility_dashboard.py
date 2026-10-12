@@ -750,19 +750,20 @@ for _, row in summary.iterrows():
                 st.switch_page(page)
 
             btn_type = lambda action: "primary" if action == rec else "secondary"
-            # If a Kobo web-form link is configured for an activity, the button opens that form
-            # (facility / data element pre-filled); otherwise it opens the in-app form as before.
+            # Every activity always has its in-app button. If a Kobo web-form link is configured for
+            # it, a second button below opens that Kobo form (facility / data element / period pre-filled).
             _kobo = {a: kobo.prefilled_link(a, facility, de_for_action, st.session_state.get("period"))
                      for a in ("DQA", "SSM", "LV")}
             for _col, _act, _page in ((a1, "DQA", "pages/2_dqa_form.py"),
                                        (a2, "SSM", "pages/3_support_supervision_form.py"),
                                        (a3, "LV", "pages/4_learning_visit_form.py")):
-                if _kobo[_act]:
-                    _col.link_button(ACTION_LABELS[_act] + " ↗", _kobo[_act], use_container_width=True,
-                                      type=btn_type(_act), disabled=not can_act)
-                elif _col.button(ACTION_LABELS[_act], key=f"{_act.lower()}_{facility}", use_container_width=True,
-                                  type=btn_type(_act), disabled=not can_act):
+                if _col.button(ACTION_LABELS[_act], key=f"{_act.lower()}_{facility}", use_container_width=True,
+                                type=btn_type(_act), disabled=not can_act):
                     route(_act, _page)
+                if _kobo[_act]:
+                    _col.link_button("📲 Open Kobo form ↗", _kobo[_act], use_container_width=True,
+                                      type=btn_type(_act), disabled=not can_act,
+                                      help="Opens the Kobo form with this facility and data element filled in.")
 
 st.caption("🔴 <50%   🟡 50–89%   🟢 ≥90% achievement  ·  highlighted button = system-recommended action "
             "(you can still pick any of the three)")
