@@ -2,13 +2,14 @@ import streamlit as st
 import plotly.express as px
 import auth
 import gsheets
+import kobo
 
 auth.require_login()
 auth.sidebar_user_badge()
 is_admin = st.session_state["user"]["role"] == "admin"
 
 st.title("📊 DQA / Support Supervision / Learning Visit Dashboard")
-
+kobo.render_sync_panel()
 tab1, tab2, tab3 = st.tabs(["🔍 DQA", "🤝 Support Supervision", "📘 Learning Visits"])
 
 with tab1:
