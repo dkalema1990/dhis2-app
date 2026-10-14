@@ -20,9 +20,14 @@ else:
 
 st.divider()
 
+prefill_findings = st.session_state.get("ssm_prefill_findings", "")
+if prefill_findings:
+    st.info("📋 The competency assessment results from this visit have been added to **Key findings** below — "
+            "edit them as needed.")
+
 with st.form("ssm_form"):
     focus_area = st.text_input("Specific focus area of the visit", value=data_element or "")
-    findings = st.text_area("Key findings / observations")
+    findings = st.text_area("Key findings / observations", value=prefill_findings, height=200 if prefill_findings else None)
     mentorship_given = st.text_area("Mentorship / on-the-job training provided")
     score = st.slider("Overall performance score (self-assessed, 0–100)", 0, 100, 50)
     recommendations = st.text_area("Recommendations")
@@ -42,6 +47,8 @@ if submitted:
             "recommendations": recommendations, "responsible_person": responsible_person,
             "follow_up_date": str(follow_up_date), "submitted_by": submitted_by,
         })
+        st.session_state.pop("ssm_prefill_findings", None)     # visit finished: clear the competency hand-off
+        st.session_state.pop("visit_flow", None)
         st.success(f"Support supervision outcome saved for **{facility}**.")
         st.page_link("pages/5_activities_dashboard.py", label="View Activities Dashboard →")
         st.page_link("pages/1_facility_dashboard.py", label="← Back to Facility Dashboard")

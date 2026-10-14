@@ -1,6 +1,9 @@
+import time
+
 import streamlit as st
 import pandas as pd
 import requests
+from streamlit.errors import StreamlitAPIException
 import plotly.express as px
 import plotly.graph_objects as go
 import auth
@@ -8,6 +11,28 @@ import gsheets
 import formulas
 import kobo
 from dhis2_client import get_mock_facility_data, generate_periods
+
+
+def _kobo_visit_dialog(facility, comp_url, ssm_url):
+    """Two ordered steps for a support supervision visit done in Kobo: the competency assessment
+    first, then the support supervision form. (Kobo opens in a new tab, so step 2 unlocks once
+    you confirm step 1 is finished.)"""
+    st.markdown(f"**{facility}** — do these in order:")
+    st.markdown("**Step 1 · Competency assessment**")
+    st.link_button("📲 Open the competency form in Kobo ↗", comp_url, use_container_width=True)
+    st.caption("Submit one form per health worker, then come back to this window.")
+    done = st.checkbox("I've finished the competency assessments (or none were needed this time)",
+                        key=f"kv_done_{facility}")
+    st.markdown("**Step 2 · Support supervision / mentorship**")
+    st.link_button("📲 Open the support supervision form in Kobo ↗", ssm_url, use_container_width=True,
+                    type="primary", disabled=not done)
+    if not done:
+        st.caption("Tick the box above to unlock step 2.")
+
+
+# st.dialog needs Streamlit >= 1.37; without it the Kobo button falls back to opening the form directly.
+kobo_visit_dialog = (st.dialog("Support supervision visit — Kobo")(_kobo_visit_dialog)
+                     if hasattr(st, "dialog") else None)
 
 auth.require_login()
 auth.sidebar_user_badge()
@@ -754,16 +779,38 @@ for _, row in summary.iterrows():
             # it, a second button below opens that Kobo form (facility / data element / period pre-filled).
             _kobo = {a: kobo.prefilled_link(a, facility, de_for_action, st.session_state.get("period"))
                      for a in ("DQA", "SSM", "LV")}
+            _kobo_comp = kobo.prefilled_link("COMP", facility, "")      # Kobo competency form, if linked
             for _col, _act, _page in ((a1, "DQA", "pages/2_dqa_form.py"),
                                        (a2, "SSM", "pages/3_support_supervision_form.py"),
                                        (a3, "LV", "pages/4_learning_visit_form.py")):
                 if _col.button(ACTION_LABELS[_act], key=f"{_act.lower()}_{facility}", use_container_width=True,
-                                type=btn_type(_act), disabled=not can_act):
-                    route(_act, _page)
+                                type=btn_type(_act), disabled=not can_act,
+                                help=("Starts with the competency assessment, then the support supervision form."
+                                      if _act == "SSM" else None)):
+                    if _act == "SSM":
+                        # Competency assessment first (step 1), then the support supervision form (step 2).
+                        st.session_state["visit_flow"] = {"facility": facility, "data_element": de_for_action,
+                                                          "next": "SSM", "assessed": 0, "findings": "",
+                                                          "started": time.time()}
+                        st.session_state.pop("ssm_prefill_findings", None)
+                        try:
+                            route("SSM", "pages/6_competency.py")
+                        except StreamlitAPIException:        # competency page isn't in the sidebar yet
+                            st.session_state.pop("visit_flow", None)
+                            route("SSM", _page)
+                    else:
+                        route(_act, _page)
                 if _kobo[_act]:
-                    _col.link_button("📲 Open Kobo form ↗", _kobo[_act], use_container_width=True,
-                                      type=btn_type(_act), disabled=not can_act,
-                                      help="Opens the Kobo form with this facility and data element filled in.")
+                    if _act == "SSM" and _kobo_comp and kobo_visit_dialog is not None:
+                        if _col.button("📲 Open in Kobo (competency first)", key=f"kobo_ssm_{facility}",
+                                        use_container_width=True, type=btn_type(_act), disabled=not can_act,
+                                        help="Opens a two-step guide: the Kobo competency form, then the Kobo "
+                                             "support supervision form."):
+                            kobo_visit_dialog(facility, _kobo_comp, _kobo["SSM"])
+                    else:
+                        _col.link_button("📲 Open Kobo form ↗", _kobo[_act], use_container_width=True,
+                                          type=btn_type(_act), disabled=not can_act,
+                                          help="Opens the Kobo form with this facility and data element filled in.")
 
 st.caption("🔴 <50%   🟡 50–89%   🟢 ≥90% achievement  ·  highlighted button = system-recommended action "
             "(you can still pick any of the three)")

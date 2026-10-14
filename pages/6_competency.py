@@ -1,3 +1,4 @@
+import time
 from datetime import date
 
 import pandas as pd
@@ -35,6 +36,34 @@ except RuntimeError as e:
     st.stop()
 items_active = comp.active_items(items_all) if not items_all.empty else items_all
 SCALE_LABELS = [label for _, label, _ in comp.SCALE]
+
+# ---------------------------------------------------------------------
+# Support supervision visit flow: the dashboard's Support Supervision button sends you here FIRST
+# (step 1 of 2); this banner then carries you on to the Support Supervision form (step 2).
+# ---------------------------------------------------------------------
+_flow = st.session_state.get("visit_flow")
+if _flow and time.time() - _flow.get("started", 0) > 3 * 3600:          # stale: ignore flows older than 3 hours
+    st.session_state.pop("visit_flow", None)
+    _flow = None
+if _flow and _flow.get("next") == "SSM":
+    with st.container(border=True):
+        _done = _flow.get("assessed", 0)
+        st.markdown(f"**Support supervision visit — step 1 of 2: competency assessment** · {_flow['facility']}")
+        st.caption("Assess each health worker below, one assessment per person. When you're finished, continue to "
+                   "the support supervision form — the competency results will be added to its findings."
+                   + (f"  ·  Assessed so far: **{_done}**" if _done else ""))
+        fc1, fc2 = st.columns([4, 1])
+        if fc1.button("Continue to the Support Supervision form →" if _done
+                      else "No competency assessment this time — go to the Support Supervision form →",
+                      type="primary" if _done else "secondary", key="flow_continue", use_container_width=True):
+            st.session_state["selected_facility"] = _flow["facility"]
+            st.session_state["selected_data_element"] = _flow.get("data_element", "")
+            st.session_state["selected_action"] = "SSM"
+            st.switch_page("pages/3_support_supervision_form.py")
+        if fc2.button("Exit", key="flow_exit", help="Leave this visit flow without continuing.", use_container_width=True):
+            st.session_state.pop("visit_flow", None)
+            st.session_state.pop("ssm_prefill_findings", None)
+            st.rerun()
 
 tab_assess, tab_results, tab_setup = st.tabs(["📝 Assess a health worker", "📊 Results", "⚙️ Checklist & Kobo form"])
 
@@ -141,6 +170,17 @@ with tab_assess:
                         "mentee": mentee.strip(), "area": area, "type": atype, "scored": len(vals),
                         "competent": competent, "pct": round(competent / len(vals) * 100, 1) if vals else 0,
                         "gaps": comp.gaps_text(scores, area_items)}
+                    _fl = st.session_state.get("visit_flow")
+                    if _fl and _fl.get("next") == "SSM":
+                        # Carry this assessment into the support supervision form's findings
+                        _res = st.session_state["comp_last"]
+                        _block = (f"{mentee.strip()} — {area} ({atype}): {_res['pct']}% competent "
+                                  f"({competent} of {len(vals)})"
+                                  + (f"\nFocus areas:\n{_res['gaps']}" if _res["gaps"] else ""))
+                        _fl["assessed"] = _fl.get("assessed", 0) + 1
+                        _fl["findings"] = (_fl["findings"] + "\n\n" if _fl.get("findings") else "") + _block
+                        st.session_state["visit_flow"] = _fl
+                        st.session_state["ssm_prefill_findings"] = "Competency assessment:\n" + _fl["findings"]
                     st.session_state["comp_form_n"] = n + 1
                     st.rerun()
 
