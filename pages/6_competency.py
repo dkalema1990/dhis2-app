@@ -299,6 +299,10 @@ with tab_setup:
             st.caption(f"{len(items_active)} active items across {items_active['service_area'].nunique()} service area(s).")
         except ValueError as e:
             st.error(f"Can't build the Kobo form yet: {e}")
+        except ImportError:
+            st.error("The `openpyxl` package isn't installed yet, so the Kobo form can't be built. Add a line "
+                     "`openpyxl>=3.1` to requirements.txt, install it (`pip install -r requirements.txt`), and "
+                     "restart the app.")
 
         st.divider()
         st.markdown("**3. Connect the Kobo project** by adding this to your Streamlit secrets "
