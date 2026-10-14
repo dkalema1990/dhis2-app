@@ -69,6 +69,7 @@ else:
     dqa_page = st.Page("pages/2_dqa_form.py", title="DQA Form", icon="📋")
     ssm_page = st.Page("pages/3_support_supervision_form.py", title="Support Supervision", icon="🤝")
     lv_page = st.Page("pages/4_learning_visit_form.py", title="Learning Visit", icon="📘")
+    competency_page = st.Page("pages/6_competency.py", title="Competency Assessment", icon="🎯")
     pages = [home_page, facility_page, dqa_page, ssm_page, lv_page, activities_page]
 
 nav = st.navigation(pages)
