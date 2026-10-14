@@ -32,9 +32,13 @@ from urllib.parse import quote
 import requests
 import streamlit as st
 
+import competency
 import gsheets
 
-FORM_SHEETS = ("DQA", "SSM", "LV")
+# Form keys as they appear in the secrets ([kobo.forms.<KEY>]) -> the Sheet tab they feed.
+FORM_SHEETS = ("DQA", "SSM", "LV", "COMP")
+SHEET_FOR = {"DQA": "DQA", "SSM": "SSM", "LV": "LV", "COMP": "Competency"}
+FORM_LABEL = {"DQA": "DQA", "SSM": "Support Supervision", "LV": "Learning Visit", "COMP": "Competency"}
 
 # The forms we generate store choice *names* (machine values) in Kobo; the Sheet has always
 # held the readable text (that's what the in-app forms write). Translate on the way in.
@@ -169,20 +173,23 @@ def submission_to_record(sheet: str, sub: dict, column_map: dict | None = None) 
 # ---------------------------------------------------------------------
 # Sync
 # ---------------------------------------------------------------------
-def sync_form(sheet: str) -> dict:
-    """Import new submissions for one form. Returns counts: fetched / new / already_in_sheet / deleted_skipped."""
+def sync_form(form_key: str) -> dict:
+    """Import new submissions for one form. Returns counts: fetched / new / already_in_sheet / deleted_skipped.
+    For the competency form one submission becomes many rows; `new` counts assessments, `rows` the rows added."""
     cfg = config()
-    form = (cfg.get("forms") or {}).get(sheet) or {}
+    form = (cfg.get("forms") or {}).get(form_key) or {}
     if not cfg.get("token") or not form.get("asset_uid"):
-        raise RuntimeError(f"Kobo isn't configured for {sheet}.")
+        raise RuntimeError(f"Kobo isn't configured for {form_key}.")
+    sheet = SHEET_FOR[form_key]
 
     subs = fetch_submissions(_server(cfg), cfg["token"], form["asset_uid"])
 
     gsheets.get_all.clear()                                # compare against the live Sheet, not a cached copy
     known = gsheets.get_kobo_ids(sheet)
     deleted = gsheets.get_kobo_deleted_ids(sheet)
+    items = competency.load_items() if form_key == "COMP" else None
 
-    new_records, already, skipped_deleted, seen = [], 0, 0, set()
+    new_records, new_subs, already, skipped_deleted, empty, seen = [], 0, 0, 0, 0, set()
     for sub in subs:
         sid = submission_id(sub)
         if not sid or sid in seen:
@@ -192,11 +199,22 @@ def sync_form(sheet: str) -> dict:
             skipped_deleted += 1
         elif sid in known:
             already += 1
+        elif form_key == "COMP":
+            rows = competency.submission_to_rows(sub, items, form.get("map") or {})
+            if rows:
+                new_records.extend(rows)
+                new_subs += 1
+            else:
+                empty += 1                                 # no recognisable answers (checklist changed?)
         else:
             new_records.append(submission_to_record(sheet, sub, form.get("map") or {}))
+            new_subs += 1
 
-    added = gsheets.append_kobo_rows(sheet, new_records)
-    return {"fetched": len(subs), "new": added, "already_in_sheet": already, "deleted_skipped": skipped_deleted}
+    rows_added = gsheets.append_kobo_rows(sheet, new_records)
+    res = {"fetched": len(subs), "new": new_subs, "already_in_sheet": already, "deleted_skipped": skipped_deleted}
+    if form_key == "COMP":
+        res.update(rows=rows_added, empty=empty)
+    return res
 
 
 def sync_all() -> dict:
@@ -226,6 +244,8 @@ def prefilled_link(sheet: str, facility: str, data_element: str, period: str | N
     if period:
         values["period"] = period
     parts = [f"d[{cmap.get(col, col)}]={quote(str(v), safe='')}" for col, v in values.items() if v]
+    if not parts:
+        return base
     return base + ("&" if "?" in base else "?") + "&".join(parts)
 
 
@@ -234,11 +254,15 @@ def prefilled_link(sheet: str, facility: str, data_element: str, period: str | N
 # ---------------------------------------------------------------------
 def _show_results(results: dict):
     for sheet, res in results.items():
+        label = FORM_LABEL.get(sheet, sheet)
         if "error" in res:
-            st.error(f"**{sheet}:** {res['error']}")
+            st.error(f"**{label}:** {res['error']}")
         else:
             extra = f", {res['deleted_skipped']} skipped (deleted in the app)" if res["deleted_skipped"] else ""
-            st.success(f"**{sheet}:** {res['new']} new, {res['already_in_sheet']} already imported{extra} "
+            if res.get("empty"):
+                extra += f", {res['empty']} had no recognisable answers (was the checklist changed after the form was deployed?)"
+            what = f"{res['new']} new assessment(s) ({res.get('rows', 0)} rows)" if sheet == "COMP" else f"{res['new']} new"
+            st.success(f"**{label}:** {what}, {res['already_in_sheet']} already imported{extra} "
                        f"— {res['fetched']} in Kobo.")
 
 
@@ -258,7 +282,7 @@ def render_sync_panel():
     with st.container(border=True):
         c1, c2 = st.columns([4, 1], vertical_alignment="center")
         c1.markdown("**🔄 Kobo sync** — import new submissions from Kobo into this dashboard "
-                    f"({', '.join(configured_sheets())}). Safe to run as often as you like.")
+                    f"({', '.join(FORM_LABEL[s] for s in configured_sheets())}). Safe to run as often as you like.")
         clicked = c2.button("Sync now", type="primary", use_container_width=True, key="kobo_sync_btn")
 
         auto = bool(config().get("auto_sync")) and not st.session_state.get("_kobo_auto_done")

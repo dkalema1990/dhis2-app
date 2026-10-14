@@ -54,6 +54,11 @@ SHEET_COLUMNS = {
     "Targets": ["facility", "data_element", "target", "updated_by", "updated_at"],
     "CalculatedFields": ["name", "formula", "created_by", "created_at"],
     "KoboDeleted": ["sheet", "kobo_id", "deleted_by", "deleted_at"],
+    # Competency assessments: one row per item scored, per assessment (see competency.py)
+    "Competency": ["assessment_id", "visit_ref", "facility", "mentee_name", "cadre", "service_area",
+                   "assessment_type", "assessment_date", "item_id", "competency", "score", "assessor",
+                   "comments", "timestamp", "kobo_id"],
+    "CompetencyItems": ["item_id", "service_area", "domain", "competency", "active"],
 }
 
 # Tabs that can receive Kobo submissions (each has a trailing `kobo_id` column)
@@ -382,6 +387,49 @@ def append_kobo_rows(sheet: str, records: list, chunk: int = 500) -> int:
         _wrap_gspread_errors(ws.append_rows)(rows[i:i + chunk])
     get_all.clear()
     return len(rows)
+
+
+# ---------------------------------------------------------------------
+# Competency assessment: editable checklist + deleting a whole assessment
+# ---------------------------------------------------------------------
+def get_competency_items() -> pd.DataFrame:
+    df = get_all("CompetencyItems")
+    return df.drop(columns=["_row"], errors="ignore") if not df.empty else df
+
+
+def save_competency_items(df: pd.DataFrame):
+    """Replace the whole checklist with `df` (columns per SHEET_COLUMNS['CompetencyItems'])."""
+    cols = SHEET_COLUMNS["CompetencyItems"]
+    out = df.reindex(columns=cols).fillna("").astype(str)
+    ws = _get_or_create_ws("CompetencyItems")
+    _wrap_gspread_errors(ws.clear)()
+    _wrap_gspread_errors(ws.update)(range_name="A1", values=[cols] + out.values.tolist())
+    get_all.clear()
+
+
+def delete_competency_assessment(assessment_id: str, deleted_by: str = "") -> int:
+    """Delete every row of one assessment. Rows imported from Kobo have their Kobo ID remembered
+    so the next sync doesn't bring them back. Returns the number of rows removed."""
+    cols = SHEET_COLUMNS["Competency"]
+    get_all.clear()
+    df = get_all("Competency")
+    if df.empty:
+        return 0
+    mask = df["assessment_id"].astype(str) == str(assessment_id)
+    removed = int(mask.sum())
+    if not removed:
+        return 0
+    now = datetime.now().isoformat(timespec="seconds")
+    kobo_ids = {str(v).strip() for v in df.loc[mask, "kobo_id"] if str(v).strip()}
+    if kobo_ids:
+        _wrap_gspread_errors(_get_or_create_ws("KoboDeleted").append_rows)(
+            [["Competency", k, deleted_by, now] for k in sorted(kobo_ids)])
+    remaining = df.loc[~mask].reindex(columns=cols).fillna("").astype(str)
+    ws = _get_or_create_ws("Competency")
+    _wrap_gspread_errors(ws.clear)()
+    _wrap_gspread_errors(ws.update)(range_name="A1", values=[cols] + remaining.values.tolist())
+    get_all.clear()
+    return removed
 
 
 # Thin convenience wrappers so the form pages read naturally
