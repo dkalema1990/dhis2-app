@@ -4,3 +4,4 @@ requests>=2.31
 plotly>=5.20
 gspread>=6.1
 google-auth>=2.30
+openpyxl>=3.1
