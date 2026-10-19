@@ -2,6 +2,7 @@ import streamlit as st
 from datetime import date
 import auth
 import gsheets
+import activity_extras as extras
 
 auth.require_role("submitter", "admin")
 auth.sidebar_user_badge()
@@ -19,6 +20,8 @@ else:
     st.markdown(f"**Facility:** {facility}  \n**Data element:** {data_element}")
 
 st.divider()
+
+loc = extras.location_block("dqa")
 
 with st.form("dqa_form"):
     period = st.text_input("Period reviewed", value=st.session_state.get("period", "2026Q3"))
@@ -45,12 +48,19 @@ with st.form("dqa_form"):
         dhis2_ou = pc1.text_input("DHIS2 Org Unit UID (this facility)")
         dhis2_de = pc2.text_input("DHIS2 Data Element UID (for corrective action text)")
 
+    att = extras.attachment_inputs("dqa")
+
     submitted = st.form_submit_button("Submit DQA Outcome", type="primary")
 
 if submitted:
     if not facility or not submitted_by:
         st.error("Facility and 'Submitted by' are required.")
     else:
+        try:
+            evidence = extras.save_attachments(att, "DQA", facility, str(date.today()))
+        except (ValueError, RuntimeError) as e:
+            st.error(f"Couldn't save the attachments, so nothing was saved: {e}")
+            st.stop()
         pushed = "no"
         if push_to_dhis2:
             client = st.session_state.get("dhis2_client")
@@ -73,7 +83,7 @@ if submitted:
             "discrepancy_reason": discrepancy_reason, "root_cause": root_cause,
             "corrective_action": corrective_action, "responsible_person": responsible_person,
             "follow_up_date": str(follow_up_date), "submitted_by": submitted_by,
-            "pushed_to_dhis2": pushed,
+            "pushed_to_dhis2": pushed, **evidence, **extras.location_fields(loc),
         })
         st.success(f"DQA outcome saved for **{facility}**.")
         st.page_link("pages/5_activities_dashboard.py", label="View Activities Dashboard →")

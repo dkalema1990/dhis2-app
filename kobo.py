@@ -127,6 +127,78 @@ def fetch_submissions(server: str, token: str, asset_uid: str, page_size: int = 
 
 
 # ---------------------------------------------------------------------
+# Location + attachments inside a submission
+# ---------------------------------------------------------------------
+PHOTO_FIELDS = ("photo_1", "photo_2", "photo_3")
+ATTENDANCE_FIELDS = ("attendance_photo", "attendance_file")
+LINK_SEP = " | "
+
+
+def _parse_location(sub: dict, field: str = "location"):
+    """(latitude, longitude, accuracy_m) from a Kobo geopoint answer ('lat lon altitude accuracy'),
+    falling back to Kobo's own _geolocation. Missing pieces come back as ''."""
+    v = _lookup(sub, field)
+    if isinstance(v, str) and v.strip():
+        parts = v.split()
+        try:
+            return (str(float(parts[0])), str(float(parts[1])),
+                    str(round(float(parts[3]), 1)) if len(parts) > 3 else "")
+        except (ValueError, IndexError):
+            pass
+    geo = sub.get("_geolocation")
+    if isinstance(geo, (list, tuple)) and len(geo) >= 2 and geo[0] is not None and geo[1] is not None:
+        return str(geo[0]), str(geo[1]), ""
+    return "", "", ""
+
+
+def _abs_url(url: str, server: str) -> str:
+    return url if url.startswith("http") else f"{server}{url if url.startswith('/') else '/' + url}"
+
+
+def _attachment_links(sub: dict, fields, server: str, used: set) -> list:
+    """Download links for the attachments belonging to the named file/image questions."""
+    atts = sub.get("_attachments") or []
+    links = []
+    for field in fields:
+        fname = _lookup(sub, field)
+        if not fname:
+            continue
+        fname = str(fname).strip()
+        for a in atts:
+            full = str(a.get("filename") or "")
+            hit = (str(a.get("media_file_basename") or "") == fname or full == fname
+                   or full.endswith("/" + fname)
+                   or str(a.get("question_xpath") or "").split("/")[-1] == field)
+            url = a.get("download_url") or ""
+            if hit and url and url not in used:
+                used.add(url)
+                links.append(_abs_url(url, server))
+                break
+    return links
+
+
+def fetch_attachment(url: str):
+    """Download one Kobo attachment with the API token. Only URLs on the configured Kobo server are
+    fetched, so the token can never be sent anywhere else. Returns (bytes, content_type)."""
+    cfg = config()
+    server = _server(cfg)
+    if not cfg.get("token") or not url.startswith(server + "/"):
+        raise RuntimeError("That link isn't on your configured Kobo server.")
+    try:
+        r = requests.get(url, headers={"Authorization": f"Token {cfg['token']}"}, timeout=60)
+    except requests.RequestException as e:
+        raise RuntimeError(f"Couldn't reach Kobo: {e}")
+    if not r.ok:
+        raise RuntimeError(f"Kobo returned {r.status_code} for that attachment.")
+    return r.content, r.headers.get("Content-Type", "")
+
+
+def is_kobo_link(url: str) -> bool:
+    server = _server(config())
+    return bool(url) and url.startswith(server + "/")
+
+
+# ---------------------------------------------------------------------
 # Submission -> Sheet row
 # ---------------------------------------------------------------------
 def _lookup(sub: dict, name: str):
@@ -144,7 +216,7 @@ def submission_id(sub: dict) -> str:
     return str(sub.get("_uuid") or sub.get("_id") or "").strip()
 
 
-def submission_to_record(sheet: str, sub: dict, column_map: dict | None = None) -> dict:
+def submission_to_record(sheet: str, sub: dict, column_map: dict | None = None, server: str = "") -> dict:
     """Turn one Kobo submission into a dict keyed by the Sheet's column names."""
     column_map = column_map or {}
     record = {}
@@ -167,6 +239,19 @@ def submission_to_record(sheet: str, sub: dict, column_map: dict | None = None) 
     if sheet == "DQA" and not record.get("pushed_to_dhis2"):
         record["pushed_to_dhis2"] = "no"
     record["kobo_id"] = submission_id(sub)
+
+    # Where it happened and what was attached (location question + photo / attendance questions)
+    record["latitude"], record["longitude"], record["gps_accuracy_m"] = _parse_location(sub, column_map.get("location", "location"))
+    used: set = set()
+    attendance = _attachment_links(sub, ATTENDANCE_FIELDS, server, used)
+    photos = _attachment_links(sub, PHOTO_FIELDS, server, used)
+    for a in sub.get("_attachments") or []:                     # anything else attached still gets kept
+        url = a.get("download_url") or ""
+        if url and url not in used:
+            used.add(url)
+            photos.append(_abs_url(url, server))
+    record["photo_links"] = LINK_SEP.join(photos)
+    record["attendance_links"] = LINK_SEP.join(attendance)
     return record
 
 
@@ -188,6 +273,9 @@ def sync_form(form_key: str) -> dict:
     known = gsheets.get_kobo_ids(sheet)
     deleted = gsheets.get_kobo_deleted_ids(sheet)
     items = competency.load_items() if form_key == "COMP" else None
+    if form_key == "COMP" and items.empty:
+        raise RuntimeError("The competency checklist is empty, so Kobo submissions can't be read. Open the "
+                           "Competency assessment page once as an admin (it creates the checklist), then sync again.")
 
     new_records, new_subs, already, skipped_deleted, empty, seen = [], 0, 0, 0, 0, set()
     for sub in subs:
@@ -207,7 +295,7 @@ def sync_form(form_key: str) -> dict:
             else:
                 empty += 1                                 # no recognisable answers (checklist changed?)
         else:
-            new_records.append(submission_to_record(sheet, sub, form.get("map") or {}))
+            new_records.append(submission_to_record(sheet, sub, form.get("map") or {}, _server(cfg)))
             new_subs += 1
 
     rows_added = gsheets.append_kobo_rows(sheet, new_records)
@@ -215,6 +303,29 @@ def sync_form(form_key: str) -> dict:
     if form_key == "COMP":
         res.update(rows=rows_added, empty=empty)
     return res
+
+
+def reconcile_ssm_scores() -> int:
+    """Fill BLANK Support Supervision scores with the competency average of the same visit (matched by
+    visit reference, else facility + date). Returns how many scores were filled."""
+    gsheets.get_all.clear()
+    ssm = gsheets.get_all("SSM")
+    if ssm.empty or "score" not in ssm.columns:
+        return 0
+    blank = ssm[ssm["score"].isna()]
+    if blank.empty:
+        return 0
+    comp_df = competency.get_assessments()
+    if comp_df.empty:
+        return 0
+    updates = []
+    for _, r in blank.iterrows():
+        avg, _n = competency.visit_average(comp_df, r.get("facility", ""), r.get("visit_ref", ""),
+                                           str(r.get("timestamp", ""))[:10])
+        if avg is not None:
+            updates.append((int(r["_row"]), "score", competency.score_from_pct(avg)))
+    gsheets.set_cells("SSM", updates)
+    return len(updates)
 
 
 def sync_all() -> dict:
@@ -226,13 +337,20 @@ def sync_all() -> dict:
             results[sheet] = sync_form(sheet)
         except RuntimeError as e:
             results[sheet] = {"error": str(e)}
+    if any(s in results for s in ("SSM", "COMP")):
+        try:
+            filled = reconcile_ssm_scores()
+            if filled:
+                results["_scores_filled"] = filled
+        except RuntimeError as e:
+            results["_scores_error"] = str(e)
     return results
 
 
 # ---------------------------------------------------------------------
 # Prefilled link to the Kobo web form (used by the dashboard's action buttons)
 # ---------------------------------------------------------------------
-def prefilled_link(sheet: str, facility: str, data_element: str, period: str | None = None):
+def prefilled_link(sheet: str, facility: str, data_element: str, period: str | None = None, extra: dict | None = None):
     """Kobo web-form URL with facility / data element (/ period) filled in, or None if this
     form has no `form_url` configured. Uses Enketo's ?d[question]=value convention."""
     form = (config().get("forms") or {}).get(sheet) or {}
@@ -243,6 +361,7 @@ def prefilled_link(sheet: str, facility: str, data_element: str, period: str | N
     values = {"facility": facility, "data_element": data_element}
     if period:
         values["period"] = period
+    values.update({kk: vv for kk, vv in (extra or {}).items() if vv})
     parts = [f"d[{cmap.get(col, col)}]={quote(str(v), safe='')}" for col, v in values.items() if v]
     if not parts:
         return base
@@ -254,6 +373,12 @@ def prefilled_link(sheet: str, facility: str, data_element: str, period: str | N
 # ---------------------------------------------------------------------
 def _show_results(results: dict):
     for sheet, res in results.items():
+        if sheet == "_scores_filled":
+            st.success(f"**Support Supervision scores:** {res} filled from the competency average.")
+            continue
+        if sheet == "_scores_error":
+            st.error(f"**Support Supervision scores:** {res}")
+            continue
         label = FORM_LABEL.get(sheet, sheet)
         if "error" in res:
             st.error(f"**{label}:** {res['error']}")

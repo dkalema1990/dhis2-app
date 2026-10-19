@@ -38,16 +38,20 @@ from datetime import datetime
 import pandas as pd
 import streamlit as st
 
+# Location + attachments recorded with an activity. Appended at the END of each tab so existing tabs
+# upgrade in place (ensure_kobo_columns adds the headers; existing rows are untouched).
+EVIDENCE_COLUMNS = ["latitude", "longitude", "gps_accuracy_m", "photo_links", "attendance_links"]
+
 SHEET_COLUMNS = {
     "DQA": ["facility", "data_element", "period", "reported_value", "verified_value",
             "discrepancy_reason", "root_cause", "corrective_action", "responsible_person",
-            "follow_up_date", "submitted_by", "timestamp", "pushed_to_dhis2", "kobo_id"],
+            "follow_up_date", "submitted_by", "timestamp", "pushed_to_dhis2", "kobo_id"] + EVIDENCE_COLUMNS,
     "SSM": ["facility", "data_element", "focus_area", "findings", "mentorship_given",
             "score", "recommendations", "responsible_person", "follow_up_date",
-            "submitted_by", "timestamp", "kobo_id"],
+            "submitted_by", "timestamp", "kobo_id"] + EVIDENCE_COLUMNS + ["visit_ref"],
     "LV": ["facility", "data_element", "best_practice", "enabling_factors",
            "lessons_learned", "dissemination_plan", "responsible_person",
-           "follow_up_date", "submitted_by", "timestamp", "kobo_id"],
+           "follow_up_date", "submitted_by", "timestamp", "kobo_id"] + EVIDENCE_COLUMNS,
     "Users": ["username", "password_hash", "role", "display_name"],
     "AchievementData": ["facility", "data_element", "period", "actual", "target",
                           "achievement_pct", "published_by", "published_at"],
@@ -179,6 +183,9 @@ def get_all(sheet: str) -> pd.DataFrame:
     df = pd.DataFrame(records)
     if not df.empty:
         df.insert(0, "_row", range(2, len(df) + 2))
+        if sheet == "SSM" and "score" in df.columns:
+            # blank scores (filled later from the competency average) must not break averages/charts
+            df["score"] = pd.to_numeric(df["score"], errors="coerce")
     return df
 
 
@@ -432,6 +439,20 @@ def delete_competency_assessment(assessment_id: str, deleted_by: str = "") -> in
     return removed
 
 
+def set_cells(sheet: str, updates: list):
+    """updates: [(sheet_row_number, column_name, value), ...] written in ONE API call."""
+    if not updates:
+        return
+    cols = SHEET_COLUMNS[sheet]
+    data = []
+    for row, col, value in updates:
+        letter = chr(ord("A") + cols.index(col))                # tabs here stay under 26 columns
+        data.append({"range": f"{letter}{row}", "values": [[str(value)]]})
+    ws = _get_or_create_ws(sheet)
+    _wrap_gspread_errors(ws.batch_update)(data)
+    get_all.clear()
+
+
 # Thin convenience wrappers so the form pages read naturally
 def save_dqa(record: dict):
     append_record("DQA", record)
@@ -464,7 +485,8 @@ def render_admin_management(sheet: str):
         with st.form(f"edit_form_{sheet}_{row}"):
             new_values = {}
             for c in cols:
-                new_values[c] = st.text_input(c, value=str(record.get(c, "")))
+                _v = record.get(c, "")
+                new_values[c] = st.text_input(c, value="" if pd.isna(_v) else str(_v))
             c1, c2 = st.columns(2)
             save = c1.form_submit_button("💾 Save changes")
             delete = c2.form_submit_button("🗑️ Delete record", type="secondary")

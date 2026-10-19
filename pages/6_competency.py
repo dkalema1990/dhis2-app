@@ -62,7 +62,8 @@ if _flow and _flow.get("next") == "SSM":
             st.switch_page("pages/3_support_supervision_form.py")
         if fc2.button("Exit", key="flow_exit", help="Leave this visit flow without continuing.", use_container_width=True):
             st.session_state.pop("visit_flow", None)
-            st.session_state.pop("ssm_prefill_findings", None)
+            for _k in ("ssm_prefill_findings", "ssm_prefill_score", "ssm_prefill_score_n", "ssm_prefill_visit_ref"):
+                st.session_state.pop(_k, None)
             st.rerun()
 
 tab_assess, tab_results, tab_setup = st.tabs(["📝 Assess a health worker", "📊 Results", "⚙️ Checklist & Kobo form"])
@@ -101,6 +102,7 @@ with tab_assess:
         adate = c6.date_input("Date of assessment", value=date.today(), key="comp_date")
         assessor = c7.text_input("Assessor", value=display_name, key="comp_assessor")
         visit_ref = c8.text_input("Visit reference (optional)", key="comp_visit",
+                                  value=(_flow or {}).get("visit_ref", ""),
                                   help="Use the same reference for every health worker assessed in one visit.")
 
         # Offline option: the same checklist as a Kobo form
@@ -178,6 +180,10 @@ with tab_assess:
                                   f"({competent} of {len(vals)})"
                                   + (f"\nFocus areas:\n{_res['gaps']}" if _res["gaps"] else ""))
                         _fl["assessed"] = _fl.get("assessed", 0) + 1
+                        _fl.setdefault("pcts", []).append(_res["pct"])
+                        st.session_state["ssm_prefill_score"] = comp.score_from_pct(sum(_fl["pcts"]) / len(_fl["pcts"]))
+                        st.session_state["ssm_prefill_score_n"] = len(_fl["pcts"])
+                        st.session_state["ssm_prefill_visit_ref"] = _fl.get("visit_ref", "")
                         _fl["findings"] = (_fl["findings"] + "\n\n" if _fl.get("findings") else "") + _block
                         st.session_state["visit_flow"] = _fl
                         st.session_state["ssm_prefill_findings"] = "Competency assessment:\n" + _fl["findings"]

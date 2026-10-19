@@ -2,6 +2,7 @@ import streamlit as st
 from datetime import date
 import auth
 import gsheets
+import activity_extras as extras
 
 auth.require_role("submitter", "admin")
 auth.sidebar_user_badge()
@@ -20,6 +21,8 @@ else:
 
 st.divider()
 
+loc = extras.location_block("lv")
+
 with st.form("lv_form"):
     best_practice = st.text_area("Best practice observed")
     enabling_factors = st.text_area("Enabling factors (what made this success possible)")
@@ -29,17 +32,25 @@ with st.form("lv_form"):
     follow_up_date = st.date_input("Planned dissemination / follow-up date", value=date.today())
     submitted_by = st.text_input("Submitted by", value=st.session_state["user"]["display_name"])
 
+    att = extras.attachment_inputs("lv")
+
     submitted = st.form_submit_button("Submit Learning Visit Outcome", type="primary")
 
 if submitted:
     if not facility or not submitted_by:
         st.error("Facility and 'Submitted by' are required.")
     else:
+        try:
+            evidence = extras.save_attachments(att, "LV", facility, str(date.today()))
+        except (ValueError, RuntimeError) as e:
+            st.error(f"Couldn't save the attachments, so nothing was saved: {e}")
+            st.stop()
         gsheets.save_lv({
             "facility": facility, "data_element": data_element, "best_practice": best_practice,
             "enabling_factors": enabling_factors, "lessons_learned": lessons_learned,
             "dissemination_plan": dissemination_plan, "responsible_person": responsible_person,
             "follow_up_date": str(follow_up_date), "submitted_by": submitted_by,
+            **evidence, **extras.location_fields(loc),
         })
         st.success(f"Learning visit outcome saved for **{facility}**.")
         st.page_link("pages/5_activities_dashboard.py", label="View Activities Dashboard →")

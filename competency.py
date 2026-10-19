@@ -332,6 +332,33 @@ def weakest(df_latest: pd.DataFrame, area: str, n: int = 10) -> pd.DataFrame:
     return g.sort_values(["pct_competent", "assessed"], ascending=[True, False]).head(n).reset_index(drop=True)
 
 
+def score_from_pct(pct: float) -> int:
+    """Whole-number support supervision score from an average % competent (62.5 -> 63, not 62)."""
+    return int(float(pct) + 0.5)
+
+
+def visit_average(df: pd.DataFrame, facility: str = "", visit_ref: str = "", date_str: str = ""):
+    """Average % competent across the assessments made during ONE visit — used to fill the
+    Support Supervision score. Matches on the visit reference when it finds any, otherwise on
+    facility + date. Returns (average, number_of_assessments), or (None, 0) when nothing matches."""
+    if df is None or df.empty:
+        return None, 0
+    ref = str(visit_ref or "").strip().lower()
+    m = df.iloc[0:0]
+    if ref:
+        m = df[df["visit_ref"].astype(str).str.strip().str.lower() == ref]
+    if m.empty and str(facility).strip() and str(date_str).strip():
+        m = df[(df["facility_key"] == str(facility).strip().lower())
+               & (df["assessment_date"].astype(str).str[:10] == str(date_str)[:10])]
+    if m.empty:
+        return None, 0
+    s = summarize(m)
+    s = s[s["pct_competent"].notna()]
+    if s.empty:
+        return None, 0
+    return float(s["pct_competent"].mean()), int(len(s))
+
+
 def gaps_text(scores: dict, items_df: pd.DataFrame) -> str:
     """Bullet list of items scored below competent — the mentorship focus for this visit."""
     text = dict(zip(items_df["item_id"], items_df["competency"]))

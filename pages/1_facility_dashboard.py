@@ -13,11 +13,15 @@ import kobo
 from dhis2_client import get_mock_facility_data, generate_periods
 
 
-def _kobo_visit_dialog(facility, comp_url, ssm_url):
+def _kobo_visit_dialog(facility, data_element, period, visit_ref):
     """Two ordered steps for a support supervision visit done in Kobo: the competency assessment
     first, then the support supervision form. (Kobo opens in a new tab, so step 2 unlocks once
     you confirm step 1 is finished.)"""
-    st.markdown(f"**{facility}** — do these in order:")
+    # One visit reference goes into BOTH Kobo forms so the competency average can later be matched to
+    # this visit's support supervision score automatically.
+    comp_url = kobo.prefilled_link("COMP", facility, "", extra={"visit_ref": visit_ref})
+    ssm_url = kobo.prefilled_link("SSM", facility, data_element, period, extra={"visit_ref": visit_ref})
+    st.markdown(f"**{facility}** — do these in order:  ·  visit reference `{visit_ref}`")
     st.markdown("**Step 1 · Competency assessment**")
     st.link_button("📲 Open the competency form in Kobo ↗", comp_url, use_container_width=True)
     st.caption("Submit one form per health worker, then come back to this window.")
@@ -28,6 +32,11 @@ def _kobo_visit_dialog(facility, comp_url, ssm_url):
                     type="primary", disabled=not done)
     if not done:
         st.caption("Tick the box above to unlock step 2.")
+
+
+def _new_visit_ref(facility: str) -> str:
+    """e.g. Kawempe-20261014-0930 — ties together everything recorded during one visit."""
+    return "".join(ch for ch in str(facility) if ch.isalnum())[:14] + time.strftime("-%Y%m%d-%H%M")
 
 
 # st.dialog needs Streamlit >= 1.37; without it the Kobo button falls back to opening the form directly.
@@ -791,8 +800,11 @@ for _, row in summary.iterrows():
                         # Competency assessment first (step 1), then the support supervision form (step 2).
                         st.session_state["visit_flow"] = {"facility": facility, "data_element": de_for_action,
                                                           "next": "SSM", "assessed": 0, "findings": "",
-                                                          "started": time.time()}
-                        st.session_state.pop("ssm_prefill_findings", None)
+                                                          "pcts": [], "started": time.time(),
+                                                          "visit_ref": _new_visit_ref(facility)}
+                        for _k in ("ssm_prefill_findings", "ssm_prefill_score", "ssm_prefill_score_n",
+                                   "ssm_prefill_visit_ref"):
+                            st.session_state.pop(_k, None)
                         try:
                             route("SSM", "pages/6_competency.py")
                         except StreamlitAPIException:        # competency page isn't in the sidebar yet
@@ -806,7 +818,8 @@ for _, row in summary.iterrows():
                                         use_container_width=True, type=btn_type(_act), disabled=not can_act,
                                         help="Opens a two-step guide: the Kobo competency form, then the Kobo "
                                              "support supervision form."):
-                            kobo_visit_dialog(facility, _kobo_comp, _kobo["SSM"])
+                            kobo_visit_dialog(facility, de_for_action, st.session_state.get("period"),
+                                              _new_visit_ref(facility))
                     else:
                         _col.link_button("📲 Open Kobo form ↗", _kobo[_act], use_container_width=True,
                                           type=btn_type(_act), disabled=not can_act,
