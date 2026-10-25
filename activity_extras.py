@@ -82,10 +82,12 @@ def location_fields(loc) -> dict:
 def attachment_inputs(prefix: str) -> dict:
     """Attendance list + photo uploaders (call INSIDE the form, before the submit button)."""
     if not storage.is_configured():
-        st.caption("📎 Attendance lists and photos can be attached here once an admin sets up file storage "
-                   "(see the setup notes) — or capture them in the Kobo form.")
+        st.info("📎 **Attendance lists and photos can't be attached here yet** — file storage hasn't been set up. "
+                "An admin can set it up in a few minutes (see `storage.py`, or ask your admin). Until then, "
+                "capture them in the Kobo form.")
         return {"attendance": [], "photos": []}
     st.markdown("**📎 Attachments**")
+    st.caption(f"Saved to {storage.describe()}. Photos are shrunk automatically so they upload quickly.")
     attendance = st.file_uploader(
         "Attendance list (photo, PDF or Excel)", type=storage.ATTENDANCE_TYPES, accept_multiple_files=True,
         key=f"{prefix}_attendance", help=f"Up to {storage.MAX_MB} MB per file.")
@@ -107,6 +109,9 @@ def save_attachments(att: dict, activity: str, facility: str, date_str: str) -> 
         for f in files:
             storage.check_file(f.name, f.size, allowed)
     for key, files, _allowed in groups:
-        links = [storage.save_file(f.getvalue(), f.name, [activity, facility, date_str]) for f in files]
+        links = []
+        for f in files:
+            data, name = storage.prepare_image(f.getvalue(), f.name)      # shrink phone photos
+            links.append(storage.save_file(data, name, [activity, facility, date_str]))
         out[key] = LINK_SEP.join(links)
     return out

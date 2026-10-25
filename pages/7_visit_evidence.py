@@ -6,6 +6,7 @@ import streamlit as st
 import auth
 import gsheets
 import kobo
+import storage
 
 auth.require_login()
 auth.sidebar_user_badge()
@@ -22,8 +23,20 @@ LABELS = {"DQA": "DQA", "SSM": "Support Supervision", "LV": "Learning Visit"}
 
 
 @st.cache_data(ttl=900, show_spinner=False, max_entries=60)
-def _fetch_kobo_file(url: str):
-    return kobo.fetch_attachment(url)
+def _fetch_private_file(url: str):
+    """Files that need a token to open (Kobo attachments, files in the GitHub evidence repository)."""
+    if kobo.is_kobo_link(url):
+        return kobo.fetch_attachment(url)
+    return storage.fetch_file(url)
+
+
+def _needs_fetch(url: str):
+    """Source label if this link can only be opened through the app, else None."""
+    if kobo.is_kobo_link(url):
+        return "Kobo"
+    if storage.is_github_link(url):
+        return "GitHub"
+    return None
 
 
 def _is_previewable_image(blob: bytes) -> bool:
@@ -134,11 +147,12 @@ for title, cell in (("Attendance lists", row["attendance_links"]), ("Photos", ro
         st.caption("None attached.")
         continue
     for i, url in enumerate(links, 1):
-        if kobo.is_kobo_link(url):
-            # Kobo files need the API token, so the app fetches them on your behalf
-            if st.button(f"Show {title.lower().rstrip('s')} {i} (from Kobo)", key=f"ev_{title}_{i}_{pick}"):
+        source = _needs_fetch(url)
+        if source:
+            # These files need a token, so the app fetches them on your behalf
+            if st.button(f"Show {title.lower().rstrip('s')} {i} (from {source})", key=f"ev_{title}_{i}_{pick}"):
                 try:
-                    blob, ctype = _fetch_kobo_file(url)
+                    blob, ctype = _fetch_private_file(url)
                     shown = False
                     if ctype.startswith("image/"):
                         if _is_previewable_image(blob):
@@ -157,3 +171,25 @@ for title, cell in (("Attendance lists", row["attendance_links"]), ("Photos", ro
 st.download_button("⬇️ Download this list (CSV)",
                    d.drop(columns=["lat", "lon"]).to_csv(index=False).encode("utf-8"),
                    "visit_evidence.csv", "text/csv")
+
+
+# ---------------------------------------------------------------------
+# File storage check (admin) — see exactly why uploads from the forms do or don't work
+# ---------------------------------------------------------------------
+if st.session_state["user"]["role"] == "admin":
+    with st.expander("🔧 File storage check (admin)"):
+        if storage.is_configured():
+            st.success(f"File storage is set up: {storage.describe()}.")
+        else:
+            st.warning("File storage isn't set up, so the forms can't attach photos or attendance lists.")
+            for p in storage.problems():
+                st.markdown(f"- {p}")
+            st.caption("Setup steps are at the top of `storage.py`.")
+        if st.button("Send a test file", key="ev_storage_test", disabled=not storage.is_configured()):
+            try:
+                with st.spinner("Saving a test file..."):
+                    link = storage.test_upload()
+                st.success("Test file saved — attachments will work.")
+                st.markdown(f"[Open the test file]({link})")
+            except RuntimeError as e:
+                st.error(str(e))
