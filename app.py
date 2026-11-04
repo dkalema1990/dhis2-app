@@ -71,7 +71,7 @@ else:
     lv_page = st.Page("pages/4_learning_visit_form.py", title="Learning Visit", icon="📘")
     competency_page = st.Page("pages/6_competency.py", title="Competency Assessment", icon="🎯")
     account_page = st.Page("pages/8_account.py", title="My account", icon="👤")
-    pages = [home_page, facility_page, dqa_page, ssm_page, lv_page, competency_page, activities_page]
+    pages = [home_page, facility_page, dqa_page, ssm_page, lv_page, competency_page, activities_page, account_page]
 
 nav = st.navigation(pages)
 nav.run()
