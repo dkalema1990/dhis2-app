@@ -47,6 +47,7 @@ auth.require_login()
 auth.sidebar_user_badge()
 role = st.session_state["user"]["role"]
 can_act = role in ("submitter", "admin")
+is_admin = role == "admin"          # only admins can delete shared data (targets, calculated fields)
 
 st.title("🏥 Facility Achievement Dashboard")
 
@@ -147,7 +148,7 @@ def render_calc_builder(extra_names, preview_df, inline=False):
             for _, cf in calc_fields.iterrows():
                 fc1, fc2 = st.columns([6, 1])
                 fc1.markdown(f"**{cf['name']}** = `{cf['formula']}`")
-                if can_act and fc2.button("🗑️", key=f"del_calc_{cf['name']}", help="Delete this calculated field"):
+                if is_admin and fc2.button("🗑️", key=f"del_calc_{cf['name']}", help="Delete this calculated field"):
                     try:
                         gsheets.delete_calculated_field(cf["name"])
                         st.rerun()
@@ -580,7 +581,8 @@ with st.expander("🎯 Targets — download a template, fill it in, then apply i
             except RuntimeError as e:
                 st.error(f"Couldn't save targets: {e}")
     if c2.button("🗑️ Clear all targets (for everyone)",
-                  disabled=(manual_targets is None or manual_targets.empty or not can_act)):
+                  disabled=(manual_targets is None or manual_targets.empty or not is_admin),
+                  help=None if is_admin else "Only an admin can clear targets."):
         try:
             gsheets.clear_targets()
             st.warning("All persisted targets cleared.")
