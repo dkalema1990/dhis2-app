@@ -45,10 +45,34 @@ _flow = st.session_state.get("visit_flow")
 if _flow and time.time() - _flow.get("started", 0) > 3 * 3600:          # stale: ignore flows older than 3 hours
     st.session_state.pop("visit_flow", None)
     _flow = None
+_has_tools = bool(kobo.prefilled_link("TOOLS", _flow["facility"], "")) if _flow else False
+if _flow and _flow.get("next") == "SSM" and _flow.get("stage") == "tools":
+    # Step 1 of 3 — the visit tools are filled in Kobo; this page just carries the visit forward.
+    with st.container(border=True):
+        st.markdown(f"**Support supervision visit — step 1 of 3: visit tools** · {_flow['facility']} · "
+                    f"visit reference `{_flow.get('visit_ref', '')}`")
+        st.markdown("Attendance, root cause analysis, action plan, IPI milestone mapping and routine indicator "
+                    "mapping — fill the sections in order in Kobo, then come back here for the competency assessment.")
+        _tools_url = kobo.prefilled_link("TOOLS", _flow["facility"], "", extra={"visit_ref": _flow.get("visit_ref", "")})
+        st.link_button("📲 Open the visit tools form in Kobo ↗", _tools_url or "", use_container_width=True,
+                        type="primary", disabled=not _tools_url)
+        tc1, tc2, tc3 = st.columns([3, 3, 1])
+        if tc1.button("I've finished the visit tools → competency assessment", type="primary", key="flow_tools_done",
+                      use_container_width=True):
+            st.session_state["visit_flow"] = {**_flow, "stage": "competency"}
+            st.rerun()
+        if tc2.button("No visit tools this time → competency assessment", key="flow_tools_skip", use_container_width=True):
+            st.session_state["visit_flow"] = {**_flow, "stage": "competency"}
+            st.rerun()
+        if tc3.button("Exit", key="flow_tools_exit", use_container_width=True):
+            st.session_state.pop("visit_flow", None)
+            st.rerun()
+    st.stop()
 if _flow and _flow.get("next") == "SSM":
     with st.container(border=True):
         _done = _flow.get("assessed", 0)
-        st.markdown(f"**Support supervision visit — step 1 of 2: competency assessment** · {_flow['facility']}")
+        st.markdown(f"**Support supervision visit — step {2 if _has_tools else 1} of {3 if _has_tools else 2}: "
+                    f"competency assessment** · {_flow['facility']}")
         st.caption("Assess each health worker below, one assessment per person. When you're finished, continue to "
                    "the support supervision form — the competency results will be added to its findings."
                    + (f"  ·  Assessed so far: **{_done}**" if _done else ""))

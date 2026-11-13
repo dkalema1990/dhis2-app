@@ -34,11 +34,12 @@ import streamlit as st
 
 import competency
 import gsheets
+import visit_tools
 
 # Form keys as they appear in the secrets ([kobo.forms.<KEY>]) -> the Sheet tab they feed.
-FORM_SHEETS = ("DQA", "SSM", "LV", "COMP")
-SHEET_FOR = {"DQA": "DQA", "SSM": "SSM", "LV": "LV", "COMP": "Competency"}
-FORM_LABEL = {"DQA": "DQA", "SSM": "Support Supervision", "LV": "Learning Visit", "COMP": "Competency"}
+FORM_SHEETS = ("DQA", "SSM", "LV", "COMP", "TOOLS")
+SHEET_FOR = {"DQA": "DQA", "SSM": "SSM", "LV": "LV", "COMP": "Competency", "TOOLS": "VisitTools"}
+FORM_LABEL = {"DQA": "DQA", "SSM": "Support Supervision", "LV": "Learning Visit", "COMP": "Competency", "TOOLS": "Visit tools"}
 
 # The forms we generate store choice *names* (machine values) in Kobo; the Sheet has always
 # held the readable text (that's what the in-app forms write). Translate on the way in.
@@ -177,6 +178,24 @@ def _attachment_links(sub: dict, fields, server: str, used: set) -> list:
     return links
 
 
+def _links_by_filenames(sub: dict, names, server: str, used: set) -> list:
+    """Download links for attachments whose file name was given as an answer (works for questions
+    inside repeating groups, where the answer is just the file name)."""
+    atts = sub.get("_attachments") or []
+    links = []
+    for fname in names:
+        fname = str(fname).strip()
+        for a in atts:
+            full = str(a.get("filename") or "")
+            url = a.get("download_url") or ""
+            if url and url not in used and (str(a.get("media_file_basename") or "") == fname or full == fname
+                                            or full.endswith("/" + fname)):
+                used.add(url)
+                links.append(_abs_url(url, server))
+                break
+    return links
+
+
 def fetch_attachment(url: str):
     """Download one Kobo attachment with the API token. Only URLs on the configured Kobo server are
     fetched, so the token can never be sent anywhere else. Returns (bytes, content_type)."""
@@ -277,6 +296,14 @@ def sync_form(form_key: str) -> dict:
         raise RuntimeError("The competency checklist is empty, so Kobo submissions can't be read. Open the "
                            "Competency assessment page once as an admin (it creates the checklist), then sync again.")
 
+    pending = {t: [] for t in (visit_tools.MAIN_TAB,) + visit_tools.CHILD_TABS}
+    child_known, ipi_labels, routine_labels = {}, {}, {}
+    if form_key == "TOOLS":
+        child_known = {t: gsheets.get_kobo_ids(t) for t in visit_tools.CHILD_TABS}
+        ipi_df, rout_df = visit_tools.load_lists()                  # restore readable indicator names
+        ipi_labels = dict(zip(ipi_df["ipi_id"], ipi_df["indicator"]))
+        routine_labels = dict(zip(rout_df["indicator_id"], rout_df["indicator"]))
+
     new_records, new_subs, already, skipped_deleted, empty, seen = [], 0, 0, 0, 0, set()
     for sub in subs:
         sid = submission_id(sub)
@@ -287,6 +314,16 @@ def sync_form(form_key: str) -> dict:
             skipped_deleted += 1
         elif sid in known:
             already += 1
+        elif form_key == "TOOLS":
+            used: set = set()
+            tables = visit_tools.submission_to_tables(
+                sub, lambda names, _s=sub, _u=used: _links_by_filenames(_s, names, _server(cfg), _u),
+                ipi_labels, routine_labels)
+            for tab in visit_tools.CHILD_TABS:
+                if sid not in child_known[tab]:                      # a retry after a partial save never duplicates
+                    pending[tab].extend(tables[tab])
+            pending[visit_tools.MAIN_TAB].extend(tables[visit_tools.MAIN_TAB])
+            new_subs += 1
         elif form_key == "COMP":
             rows = competency.submission_to_rows(sub, items, form.get("map") or {})
             if rows:
@@ -298,9 +335,15 @@ def sync_form(form_key: str) -> dict:
             new_records.append(submission_to_record(sheet, sub, form.get("map") or {}, _server(cfg)))
             new_subs += 1
 
-    rows_added = gsheets.append_kobo_rows(sheet, new_records)
+    if form_key == "TOOLS":
+        rows_added = 0
+        for tab in visit_tools.CHILD_TABS:                           # the visit row goes LAST: it marks the visit as imported
+            rows_added += gsheets.append_kobo_rows(tab, pending[tab])
+        gsheets.append_kobo_rows(visit_tools.MAIN_TAB, pending[visit_tools.MAIN_TAB])
+    else:
+        rows_added = gsheets.append_kobo_rows(sheet, new_records)
     res = {"fetched": len(subs), "new": new_subs, "already_in_sheet": already, "deleted_skipped": skipped_deleted}
-    if form_key == "COMP":
+    if form_key in ("COMP", "TOOLS"):
         res.update(rows=rows_added, empty=empty)
     return res
 
@@ -350,6 +393,33 @@ def sync_all() -> dict:
 # ---------------------------------------------------------------------
 # Prefilled link to the Kobo web form (used by the dashboard's action buttons)
 # ---------------------------------------------------------------------
+# The steps of a support supervision visit that are done in Kobo, in order.
+STEP_INFO = {
+    "TOOLS": ("Visit tools", "Attendance, root cause analysis, action plan, IPI milestone mapping and routine "
+                             "indicator mapping — fill the sections in order."),
+    "COMP": ("Competency assessment", "Submit one form per health worker."),
+    "SSM": ("Support supervision / mentorship form", "The visit report. Leave the score blank to have it filled in "
+                                                     "from the competency average."),
+}
+
+
+def visit_step_keys() -> list:
+    """Visit steps that have a Kobo web-form link in the secrets, in the order they're done."""
+    forms = config().get("forms") or {}
+    return [k for k in ("TOOLS", "COMP", "SSM") if isinstance(forms.get(k), dict) and forms[k].get("form_url")]
+
+
+def visit_steps(facility: str, data_element: str, period, visit_ref: str) -> list:
+    """The ordered Kobo steps of a visit, each with a prefilled link carrying the SAME visit reference."""
+    out = []
+    for key in visit_step_keys():
+        url = prefilled_link(key, facility, data_element if key == "SSM" else "", period if key == "SSM" else None,
+                             extra={"visit_ref": visit_ref})
+        title, note = STEP_INFO[key]
+        out.append({"key": key, "title": title, "note": note, "url": url})
+    return out
+
+
 def prefilled_link(sheet: str, facility: str, data_element: str, period: str | None = None, extra: dict | None = None):
     """Kobo web-form URL with facility / data element (/ period) filled in, or None if this
     form has no `form_url` configured. Uses Enketo's ?d[question]=value convention."""
@@ -386,7 +456,9 @@ def _show_results(results: dict):
             extra = f", {res['deleted_skipped']} skipped (deleted in the app)" if res["deleted_skipped"] else ""
             if res.get("empty"):
                 extra += f", {res['empty']} had no recognisable answers (was the checklist changed after the form was deployed?)"
-            what = f"{res['new']} new assessment(s) ({res.get('rows', 0)} rows)" if sheet == "COMP" else f"{res['new']} new"
+            what = (f"{res['new']} new assessment(s) ({res.get('rows', 0)} rows)" if sheet == "COMP"
+                    else f"{res['new']} new visit(s) ({res.get('rows', 0)} rows in the tool tabs)" if sheet == "TOOLS"
+                    else f"{res['new']} new")
             st.success(f"**{label}:** {what}, {res['already_in_sheet']} already imported{extra} "
                        f"— {res['fetched']} in Kobo.")
 

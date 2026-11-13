@@ -14,24 +14,21 @@ from dhis2_client import get_mock_facility_data, generate_periods
 
 
 def _kobo_visit_dialog(facility, data_element, period, visit_ref):
-    """Two ordered steps for a support supervision visit done in Kobo: the competency assessment
-    first, then the support supervision form. (Kobo opens in a new tab, so step 2 unlocks once
-    you confirm step 1 is finished.)"""
-    # One visit reference goes into BOTH Kobo forms so the competency average can later be matched to
-    # this visit's support supervision score automatically.
-    comp_url = kobo.prefilled_link("COMP", facility, "", extra={"visit_ref": visit_ref})
-    ssm_url = kobo.prefilled_link("SSM", facility, data_element, period, extra={"visit_ref": visit_ref})
-    st.markdown(f"**{facility}** — do these in order:  ·  visit reference `{visit_ref}`")
-    st.markdown("**Step 1 · Competency assessment**")
-    st.link_button("📲 Open the competency form in Kobo ↗", comp_url, use_container_width=True)
-    st.caption("Submit one form per health worker, then come back to this window.")
-    done = st.checkbox("I've finished the competency assessments (or none were needed this time)",
-                        key=f"kv_done_{facility}")
-    st.markdown("**Step 2 · Support supervision / mentorship**")
-    st.link_button("📲 Open the support supervision form in Kobo ↗", ssm_url, use_container_width=True,
-                    type="primary", disabled=not done)
-    if not done:
-        st.caption("Tick the box above to unlock step 2.")
+    """The visit steps done in Kobo, in order: visit tools -> competency -> support supervision form.
+    Kobo opens in a new tab and the app can't tell when you've submitted, so each next step unlocks once
+    you confirm the previous one is finished. One visit reference goes into every form."""
+    steps = kobo.visit_steps(facility, data_element, period, visit_ref)
+    st.markdown(f"**{facility}** — do these in order  ·  visit reference `{visit_ref}`")
+    unlocked = True
+    for i, s in enumerate(steps, 1):
+        st.markdown(f"**Step {i} · {s['title']}**")
+        st.link_button("📲 Open in Kobo ↗", s["url"], use_container_width=True,
+                        type="primary" if i == len(steps) else "secondary", disabled=not unlocked)
+        st.caption(s["note"])
+        if i < len(steps):
+            ticked = st.checkbox("I've finished this step (or it wasn't needed this time)",
+                                  key=f"kv_done_{facility}_{s['key']}", disabled=not unlocked)
+            unlocked = unlocked and ticked
 
 
 def _new_visit_ref(facility: str) -> str:
@@ -790,20 +787,22 @@ for _, row in summary.iterrows():
             # it, a second button below opens that Kobo form (facility / data element / period pre-filled).
             _kobo = {a: kobo.prefilled_link(a, facility, de_for_action, st.session_state.get("period"))
                      for a in ("DQA", "SSM", "LV")}
-            _kobo_comp = kobo.prefilled_link("COMP", facility, "")      # Kobo competency form, if linked
+            _step_keys = kobo.visit_step_keys()                         # Kobo visit steps that are linked
             for _col, _act, _page in ((a1, "DQA", "pages/2_dqa_form.py"),
                                        (a2, "SSM", "pages/3_support_supervision_form.py"),
                                        (a3, "LV", "pages/4_learning_visit_form.py")):
                 if _col.button(ACTION_LABELS[_act], key=f"{_act.lower()}_{facility}", use_container_width=True,
                                 type=btn_type(_act), disabled=not can_act,
-                                help=("Starts with the competency assessment, then the support supervision form."
+                                help=("Takes you through the visit steps in order, ending with the support supervision form."
                                       if _act == "SSM" else None)):
                     if _act == "SSM":
                         # Competency assessment first (step 1), then the support supervision form (step 2).
                         st.session_state["visit_flow"] = {"facility": facility, "data_element": de_for_action,
                                                           "next": "SSM", "assessed": 0, "findings": "",
                                                           "pcts": [], "started": time.time(),
-                                                          "visit_ref": _new_visit_ref(facility)}
+                                                          "visit_ref": _new_visit_ref(facility),
+                                                          # the visit tools (Kobo) come first when that form is linked
+                                                          "stage": "tools" if "TOOLS" in _step_keys else "competency"}
                         for _k in ("ssm_prefill_findings", "ssm_prefill_score", "ssm_prefill_score_n",
                                    "ssm_prefill_visit_ref"):
                             st.session_state.pop(_k, None)
@@ -815,11 +814,11 @@ for _, row in summary.iterrows():
                     else:
                         route(_act, _page)
                 if _kobo[_act]:
-                    if _act == "SSM" and _kobo_comp and kobo_visit_dialog is not None:
-                        if _col.button("📲 Open in Kobo (competency first)", key=f"kobo_ssm_{facility}",
+                    if _act == "SSM" and len(_step_keys) >= 2 and kobo_visit_dialog is not None:
+                        if _col.button("📲 Open in Kobo (visit steps)", key=f"kobo_ssm_{facility}",
                                         use_container_width=True, type=btn_type(_act), disabled=not can_act,
-                                        help="Opens a two-step guide: the Kobo competency form, then the Kobo "
-                                             "support supervision form."):
+                                        help="Opens a step-by-step guide through the Kobo forms of the visit, "
+                                             "in order, ending with the support supervision form."):
                             kobo_visit_dialog(facility, de_for_action, st.session_state.get("period"),
                                               _new_visit_ref(facility))
                     else:

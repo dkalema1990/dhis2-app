@@ -63,7 +63,23 @@ SHEET_COLUMNS = {
                    "assessment_type", "assessment_date", "item_id", "competency", "score", "assessor",
                    "comments", "timestamp", "kobo_id"],
     "CompetencyItems": ["item_id", "service_area", "domain", "competency", "active"],
+    # Support supervision visit tools (see visit_tools.py). One row per visit in VisitTools; the other
+    # tabs hold the rows of each tool, all tied to the visit by visit_ref and kobo_id.
+    "VisitTools": ["visit_ref", "facility", "visit_date", "assessor", "attendance_method", "attendee_count",
+                   "attendance_upload_links", "rca_method", "rca_problem", "rca_root_cause", "action_count",
+                   "ipi_count", "routine_count", "comments", "timestamp", "kobo_id"],
+    "VisitAttendance": ["visit_ref", "facility", "visit_date", "fullname", "cadre", "email", "phone", "timestamp", "kobo_id"],
+    "VisitRCA": ["visit_ref", "facility", "visit_date", "method", "section", "item", "text", "timestamp", "kobo_id"],
+    "VisitActions": ["visit_ref", "facility", "visit_date", "challenge", "corrective_action", "responsible_person",
+                     "timeline", "timestamp", "kobo_id"],
+    "VisitIPI": ["visit_ref", "facility", "visit_date", "ipi_indicator", "action", "evidence", "evidence_links",
+                 "timestamp", "kobo_id"],
+    "VisitRoutine": ["visit_ref", "facility", "visit_date", "indicator", "benchmark", "achieved", "timestamp", "kobo_id"],
+    "IPIIndicators": ["ipi_id", "indicator", "active"],
+    "RoutineIndicators": ["indicator_id", "indicator", "active"],
 }
+
+VISIT_TABS = ("VisitTools", "VisitAttendance", "VisitRCA", "VisitActions", "VisitIPI", "VisitRoutine")
 
 # Tabs that can receive Kobo submissions (each has a trailing `kobo_id` column)
 KOBO_SHEETS = ("DQA", "SSM", "LV")
@@ -451,6 +467,52 @@ def set_cells(sheet: str, updates: list):
     ws = _get_or_create_ws(sheet)
     _wrap_gspread_errors(ws.batch_update)(data)
     get_all.clear()
+
+
+# ---------------------------------------------------------------------
+# Generic editable tables (indicator lists) and the visit tools data
+# ---------------------------------------------------------------------
+def get_table(sheet: str) -> pd.DataFrame:
+    df = get_all(sheet)
+    return df.drop(columns=["_row"], errors="ignore") if not df.empty else df
+
+
+def save_table(sheet: str, df: pd.DataFrame):
+    """Replace the whole tab with `df` (columns per SHEET_COLUMNS[sheet])."""
+    cols = SHEET_COLUMNS[sheet]
+    out = df.reindex(columns=cols).fillna("").astype(str)
+    ws = _get_or_create_ws(sheet)
+    _wrap_gspread_errors(ws.clear)()
+    _wrap_gspread_errors(ws.update)(range_name="A1", values=[cols] + out.values.tolist())
+    get_all.clear()
+
+
+def delete_visit_tools(kobo_id: str, deleted_by: str = "") -> int:
+    """Delete everything one Kobo visit-tools submission put into the Sheet (all six tabs). The Kobo ID
+    is remembered so the next sync doesn't bring it back. Returns the number of rows removed."""
+    kid = str(kobo_id).strip()
+    if not kid:
+        return 0
+    get_all.clear()
+    removed = 0
+    for tab in VISIT_TABS:
+        df = get_all(tab)
+        if df.empty or "kobo_id" not in df.columns:
+            continue
+        mask = df["kobo_id"].astype(str).str.strip() == kid
+        if not mask.any():
+            continue
+        removed += int(mask.sum())
+        cols = SHEET_COLUMNS[tab]
+        keep = df.loc[~mask].reindex(columns=cols).fillna("").astype(str)
+        ws = _get_or_create_ws(tab)
+        _wrap_gspread_errors(ws.clear)()
+        _wrap_gspread_errors(ws.update)(range_name="A1", values=[cols] + keep.values.tolist())
+    if removed:
+        _wrap_gspread_errors(_get_or_create_ws("KoboDeleted").append_row)(
+            ["VisitTools", kid, deleted_by, datetime.now().isoformat(timespec="seconds")])
+    get_all.clear()
+    return removed
 
 
 # Thin convenience wrappers so the form pages read naturally
