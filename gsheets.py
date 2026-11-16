@@ -94,6 +94,8 @@ SHEET_COLUMNS = {
                      "qi_points", "qi_run_chart", "qi_change_idea", "qi_coach", "overall_rating", "timestamp", "kobo_id"],
     # status of each action of a past visit's action plan, set in the app (latest row per action_key wins)
     "ActionStatus": ["action_key", "visit_ref", "facility", "action", "status", "comment", "updated_by", "updated_at"],
+    # facility list for the Kobo visit form's dropdown, pulled from DHIS2 org units
+    "Facilities": ["org_unit_id", "name", "parent", "level", "updated_at"],
     "IPIIndicators": ["ipi_id", "indicator", "active"],
     "RoutineIndicators": ["indicator_id", "indicator", "active"],
 }
@@ -467,6 +469,21 @@ def save_competency_items(df: pd.DataFrame):
     cols = SHEET_COLUMNS["CompetencyItems"]
     out = df.reindex(columns=cols).fillna("").astype(str)
     ws = _get_or_create_ws("CompetencyItems")
+    _wrap_gspread_errors(ws.clear)()
+    _wrap_gspread_errors(ws.update)(range_name="A1", values=[cols] + out.values.tolist())
+    get_all.clear()
+
+
+def get_facilities() -> pd.DataFrame:
+    df = get_all("Facilities")
+    return df.drop(columns=["_row"], errors="ignore") if not df.empty else df
+
+
+def save_facilities(df: pd.DataFrame):
+    """Replace the saved facility list (columns per SHEET_COLUMNS['Facilities'])."""
+    cols = SHEET_COLUMNS["Facilities"]
+    out = df.reindex(columns=cols).fillna("").astype(str)
+    ws = _get_or_create_ws("Facilities")
     _wrap_gspread_errors(ws.clear)()
     _wrap_gspread_errors(ws.update)(range_name="A1", values=[cols] + out.values.tolist())
     get_all.clear()

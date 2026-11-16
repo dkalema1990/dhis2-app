@@ -36,6 +36,7 @@ try:
     ipi_all, routine_all = vt.load_lists(seed=can_act)          # fills the sample lists the first time
     items_all = comp.load_items(seed=can_act)                   # the competency checklist (part of the visit form)
     parts_all = gsheets.get_topic_parts()                       # Parts D/E/F of the topic tools
+    fac_all = gsheets.get_facilities()                          # facility dropdown of the Kobo form (from DHIS2)
 except RuntimeError as e:
     st.error(f"Couldn't load the indicator lists: {e}")
     st.stop()
@@ -404,14 +405,41 @@ with tab_setup:
                     st.error(f"Couldn't save: {e}")
 
         st.divider()
-        st.markdown("**2. Get the Kobo form.** One form for the whole visit: the visit tools (with a repeatable root "
+        st.markdown("**2. Facility list for the Kobo form (from DHIS2).** The form's *Facility* question becomes a search-as-you-type "
+                    "dropdown, so supervisors who open the link themselves pick the same spelling as the dashboard. "
+                    "Without a list the question is a plain text box.")
+        n_fac = len(vt.facility_choices(fac_all))
+        _fc = st.session_state.get("dhis2_client")
+        if is_admin:
+            _lvl = st.number_input("Org unit level of facilities (4 is typical)", min_value=1, max_value=8, value=4, step=1, key="vt_fac_level")
+            if _fc is None:
+                st.info("Connect to DHIS2 first (Home page), then come back and refresh the list.")
+            elif st.button("🔄 Refresh facility list from DHIS2", key="vt_fac_refresh"):
+                try:
+                    with st.spinner("Fetching org units..."):
+                        _ou = _fc.get_org_units(level=int(_lvl))
+                    _df = pd.DataFrame({"org_unit_id": _ou.get("id", ""), "name": _ou.get("name", ""),
+                                        "parent": _ou["parent"].map(lambda p: p.get("name", "") if isinstance(p, dict) else "") if "parent" in _ou else "",
+                                        "level": int(_lvl), "updated_at": pd.Timestamp.now().isoformat(timespec="seconds")})
+                    if _df.empty:
+                        st.warning("DHIS2 returned no org units at that level.")
+                    else:
+                        gsheets.save_facilities(_df)
+                        st.session_state["vt_flash"] = (f"Saved {len(_df)} facilities. Download the Kobo form again and replace it in Kobo.")
+                        st.rerun()
+                except RuntimeError as e:
+                    st.error(f"Couldn't load org units: {e}")
+        st.caption(f"{n_fac} facilities saved." if n_fac else "No facility list saved yet.")
+
+        st.divider()
+        st.markdown("**3. Get the Kobo form.** One form for the whole visit: the visit tools (with a repeatable root "
                     "cause analysis), then it asks *\"continue to the competency assessment?\"* (one block per health "
                     "worker, from your competency checklist), then *\"continue to the support supervision report?\"*. "
                     "Built from the *saved* lists. Upload it to Kobo as a new project and deploy it. "
                     "**Whenever you change these lists or the competency checklist, download the form again and "
                     "replace it in Kobo** — Kobo keeps the options it was deployed with.")
         try:
-            xls = vt.build_xlsform(ipi_all, routine_all, items_all, parts_all)
+            xls = vt.build_xlsform(ipi_all, routine_all, items_all, parts_all, fac_all)
             st.download_button("⬇️ Download Kobo form (XLSForm)", xls, "visit_tools_form.xlsx",
                                "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", key="vt_dl_form")
             n_items = int((items_all["active"] != "no").sum()) if not items_all.empty else 0
@@ -426,7 +454,7 @@ with tab_setup:
                      "`openpyxl>=3.1` to requirements.txt, install it, and restart the app.")
 
         st.divider()
-        st.markdown("**3. Connect the Kobo project** by adding this to your Streamlit secrets "
+        st.markdown("**4. Connect the Kobo project** by adding this to your Streamlit secrets "
                     "(same file as the other Kobo forms):")
         st.code('[kobo.forms.TOOLS]\nasset_uid = "your-visit-tools-project-id"\n'
                 'form_url = "paste the Collect data link here"   # the dashboard buttons open this all-in-one form',

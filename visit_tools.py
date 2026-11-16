@@ -169,6 +169,31 @@ def _r(type_, name="", label="", hint="", required="", relevant="", default="", 
 
 
 
+def facility_choices(df: pd.DataFrame | None) -> list:
+    """[(choice name, label)] for the facility dropdown. The name IS the facility name (what the dashboard and
+    DHIS2 use), so links from the dashboard and the synced records match. Duplicate names get the parent added."""
+    if df is None or df.empty or "name" not in df.columns:
+        return []
+    d = df.fillna("").astype(str)
+    d["name"] = d["name"].str.strip()
+    d = d[d["name"] != ""].drop_duplicates(subset=["org_unit_id", "name"]) if "org_unit_id" in d.columns else d[d["name"] != ""]
+    parent = d["parent"] if "parent" in d.columns else pd.Series([""] * len(d), index=d.index)
+    dup = d["name"].duplicated(keep=False)
+    out, seen = [], set()
+    for (_, r), p, is_dup in zip(d.iterrows(), parent, dup):
+        key = f"{r['name']} ({p})" if is_dup and p else r["name"]
+        if key in seen:
+            continue
+        seen.add(key)
+        out.append((key, key if not p or is_dup else f"{r['name']} ({p})"))
+    return sorted(out, key=lambda x: x[1].lower())
+
+
+def _facility_of(flat: dict) -> str:
+    f = _txt(flat.get("facility"))
+    return _txt(flat.get("facility_other")) if f == "__other__" else f
+
+
 def _topic_blocks(parts: pd.DataFrame, topics: list) -> list:
     """Report-part rows: the topic picker, then (per topic) Part D systems, Part E data verification and
     Part F record review, then the generic Parts G (session record), I (QI link) and J (rating)."""
@@ -266,7 +291,7 @@ def _topic_blocks(parts: pd.DataFrame, topics: list) -> list:
 
 
 def build_xlsform(ipi_df: pd.DataFrame, routine_df: pd.DataFrame, items_df: pd.DataFrame | None = None,
-                  parts_df: pd.DataFrame | None = None, form_title: str = "Support Supervision Visit", form_id: str = "visit_tools") -> bytes:
+                  parts_df: pd.DataFrame | None = None, facilities_df: pd.DataFrame | None = None, form_title: str = "Support Supervision Visit", form_id: str = "visit_tools") -> bytes:
     """An .xlsx XLSForm ready to upload to Kobo — the whole visit in one form:
        1-5  the visit tools (attendance, RCA — repeatable, action plan, IPI mapping, routine indicators)
        then "Continue to the competency assessment?"  -> one block per health worker, from the checklist
@@ -292,9 +317,18 @@ def build_xlsform(ipi_df: pd.DataFrame, routine_df: pd.DataFrame, items_df: pd.D
     topic_titles = list(dict.fromkeys(parts["topic"]))             # topics that have Parts D/E/F
 
     ML = "multiline"
-    s = [
-        _r("text", "facility", "Facility", "Filled in automatically when opened from the dashboard — correct it if needed.", "yes"),
-        _r("text", "visit_ref", "Visit reference", "Filled in automatically. It ties together everything recorded in this visit — leave it as it is."),
+    fac_choices = facility_choices(facilities_df)
+    if fac_choices:
+        fac_rows = [
+            _r("select_one facilities", "facility", "Facility", "Start typing to search. Filled in automatically when opened from the dashboard.", "yes",
+               appearance="autocomplete"),
+            _r("text", "facility_other", "Facility name (not in the list)", required="yes", relevant="${facility} = '__other__'"),
+        ]
+    else:
+        fac_rows = [_r("text", "facility", "Facility", "Filled in automatically when opened from the dashboard — correct it if needed.", "yes")]
+    s = fac_rows + [
+        _r("text", "visit_ref", "Visit reference", "Made automatically (or filled in by the app). It ties together everything recorded in this visit - leave it as it is.",
+           default="concat('V', format-date(today(), '%Y%m%d'), '-', substr(uuid(), 1, 6))"),
         _r("date", "visit_date", "Date of the visit", required="yes", default="today()"),
         _r("text", "data_element", "Data element / service area of the visit (optional)", "Filled in automatically when opened from the dashboard."),
         _r("text", "prev_actions", "Previous visit's action plan (for reference)",
@@ -482,7 +516,10 @@ def build_xlsform(ipi_df: pd.DataFrame, routine_df: pd.DataFrame, items_df: pd.D
     if clash:
         raise ValueError("These competency item_ids clash with questions in the visit form — rename them: " + ", ".join(clash))
 
-    ch = [("cadres", competency.slug(c), c) for c in competency.CADRES]
+    ch = [("facilities", n, lab) for n, lab in fac_choices]
+    if fac_choices:
+        ch.append(("facilities", "__other__", "Other (not in the list)"))
+    ch += [("cadres", competency.slug(c), c) for c in competency.CADRES]
     ch += [("divisions", competency.slug(d), d) for d in DIVISIONS]
     ch += [("facility_levels", c, l) for c, l in FACILITY_LEVELS] + [("visit_types", c, l) for c, l in VISIT_TYPES]
     ch += [("visit_modes", c, l) for c, l in VISIT_MODES] + [("followup_status", c, l) for c, l in FOLLOWUP_STATUS]
@@ -573,7 +610,7 @@ def submission_to_tables(sub: dict, links_fn=None, ipi_labels: dict | None = Non
     flat = _flat(sub)
     kid = str(sub.get("_uuid") or sub.get("_id") or "").strip()
     cadre_by_slug = {competency.slug(c): c for c in competency.CADRES}
-    base = {"visit_ref": _txt(flat.get("visit_ref")), "facility": _txt(flat.get("facility")),
+    base = {"visit_ref": _txt(flat.get("visit_ref")), "facility": _facility_of(flat),
             "visit_date": _txt(flat.get("visit_date")) or str(sub.get("_submission_time", ""))[:10],
             "timestamp": str(sub.get("_submission_time", "")), "kobo_id": kid}
 
@@ -757,7 +794,7 @@ def competency_rows_from_visit(sub: dict, items_df: pd.DataFrame):
         if not any(_txt(v) for v in e.values()):
             continue
         pseudo = {**e, "_uuid": f"{sid}#{i}", "_submission_time": when, "_submitted_by": sub.get("_submitted_by"),
-                  "facility": flat.get("facility", ""), "visit_ref": flat.get("visit_ref", ""),
+                  "facility": _facility_of(flat), "visit_ref": flat.get("visit_ref", ""),
                   "assessment_date": _txt(flat.get("visit_date")) or when[:10],
                   "assessor": flat.get("assessor", ""), "comments": e.get("comp_comments", "")}
         got = competency.submission_to_rows(pseudo, items_df)
@@ -792,7 +829,7 @@ def ssm_row_from_visit(sub: dict, links_fn, avg_pct, loc=("", "", ""), attendanc
     if not score and avg_pct is not None:
         score = str(competency.score_from_pct(avg_pct))
     photos = [_txt(flat.get(f)) for f in SSM_PHOTO_FIELDS if _txt(flat.get(f))]
-    return {"facility": _txt(flat.get("facility")), "data_element": _txt(flat.get("data_element")),
+    return {"facility": _facility_of(flat), "data_element": _txt(flat.get("data_element")),
             "focus_area": _txt(flat.get("focus_area")), "findings": _txt(flat.get("findings")),
             "mentorship_given": _txt(flat.get("mentorship_given")), "score": score,
             "recommendations": _txt(flat.get("recommendations")), "responsible_person": _txt(flat.get("responsible_person")),
