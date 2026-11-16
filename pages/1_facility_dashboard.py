@@ -813,7 +813,15 @@ for _, row in summary.iterrows():
                             route("SSM", _page)
                     else:
                         route(_act, _page)
-                if _kobo[_act]:
+                if _act == "SSM" and "TOOLS" in _step_keys:
+                    # the all-in-one visit form: tools -> (ask) competency -> (ask) support supervision report
+                    _visit_url = kobo.visit_steps(facility, de_for_action, st.session_state.get("period"),
+                                                  _new_visit_ref(facility))[0]["url"]
+                    _col.link_button("📲 Open Kobo visit form ↗", _visit_url, use_container_width=True,
+                                      type=btn_type(_act), disabled=not can_act,
+                                      help="One Kobo form for the whole visit: the visit tools, then it asks whether to "
+                                           "continue to the competency assessment and the support supervision report.")
+                elif _kobo[_act]:
                     if _act == "SSM" and len(_step_keys) >= 2 and kobo_visit_dialog is not None:
                         if _col.button("📲 Open in Kobo (visit steps)", key=f"kobo_ssm_{facility}",
                                         use_container_width=True, type=btn_type(_act), disabled=not can_act,

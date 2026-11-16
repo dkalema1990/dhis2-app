@@ -61,28 +61,55 @@ SHEET_COLUMNS = {
     # Competency assessments: one row per item scored, per assessment (see competency.py)
     "Competency": ["assessment_id", "visit_ref", "facility", "mentee_name", "cadre", "service_area",
                    "assessment_type", "assessment_date", "item_id", "competency", "score", "assessor",
-                   "comments", "timestamp", "kobo_id"],
+                   "comments", "timestamp", "kobo_id", "unit", "phone", "on_cohort"],
     "CompetencyItems": ["item_id", "service_area", "domain", "competency", "active"],
     # Support supervision visit tools (see visit_tools.py). One row per visit in VisitTools; the other
     # tabs hold the rows of each tool, all tied to the visit by visit_ref and kobo_id.
     "VisitTools": ["visit_ref", "facility", "visit_date", "assessor", "attendance_method", "attendee_count",
                    "attendance_upload_links", "rca_method", "rca_problem", "rca_root_cause", "action_count",
-                   "ipi_count", "routine_count", "comments", "timestamp", "kobo_id"],
+                   "ipi_count", "routine_count", "comments", "timestamp", "kobo_id", "rca_count",
+                   # Part A of the mentorship tool
+                   "kcca_division", "facility_level", "visit_type", "visit_mode", "units_visited", "priority_facility",
+                   "lead_mentor", "co_mentor", "facility_in_charge", "time_in", "time_out"],
     "VisitAttendance": ["visit_ref", "facility", "visit_date", "fullname", "cadre", "email", "phone", "timestamp", "kobo_id"],
-    "VisitRCA": ["visit_ref", "facility", "visit_date", "method", "section", "item", "text", "timestamp", "kobo_id"],
+    "VisitRCA": ["visit_ref", "facility", "visit_date", "method", "section", "item", "text", "timestamp", "kobo_id", "analysis_no"],
     "VisitActions": ["visit_ref", "facility", "visit_date", "challenge", "corrective_action", "responsible_person",
-                     "timeline", "timestamp", "kobo_id"],
+                     "timeline", "timestamp", "kobo_id", "escalate_to"],
     "VisitIPI": ["visit_ref", "facility", "visit_date", "ipi_indicator", "action", "evidence", "evidence_links",
                  "timestamp", "kobo_id"],
     "VisitRoutine": ["visit_ref", "facility", "visit_date", "indicator", "benchmark", "achieved", "timestamp", "kobo_id"],
+    # Mentorship topic tools (see mentorship.py): library + what was recorded in each visit
+    "TopicParts": ["topic", "part", "item_id", "group", "text", "method", "num_def", "den_def", "benchmark", "active"],
+    "VisitFollowUp": ["visit_ref", "facility", "visit_date", "action", "responsible", "due_date", "status", "comment",
+                      "timestamp", "kobo_id"],
+    "VisitSystems": ["visit_ref", "facility", "visit_date", "topic", "group", "standard", "score", "evidence",
+                     "timestamp", "kobo_id"],
+    "VisitIndicators": ["visit_ref", "facility", "visit_date", "topic", "indicator", "numerator", "denominator", "pct",
+                        "benchmark", "reported_dhis2", "variance_pct", "met", "timestamp", "kobo_id"],
+    "VisitRecords": ["visit_ref", "facility", "visit_date", "topic", "record_no", "client_id", "details",
+                     "timestamp", "kobo_id"],
+    "VisitSession": ["visit_ref", "facility", "visit_date", "topic", "systems_pct", "systems_rating", "records_met",
+                     "records_total", "records_pct", "record_observation", "skills_mentored", "methods", "female",
+                     "male", "hours", "job_aids", "good_practices", "qi_status", "qi_aim", "qi_baseline", "qi_value",
+                     "qi_points", "qi_run_chart", "qi_change_idea", "qi_coach", "overall_rating", "timestamp", "kobo_id"],
     "IPIIndicators": ["ipi_id", "indicator", "active"],
     "RoutineIndicators": ["indicator_id", "indicator", "active"],
 }
 
-VISIT_TABS = ("VisitTools", "VisitAttendance", "VisitRCA", "VisitActions", "VisitIPI", "VisitRoutine")
+VISIT_TABS = ("VisitTools", "VisitAttendance", "VisitRCA", "VisitActions", "VisitIPI", "VisitRoutine",
+              "VisitFollowUp", "VisitSystems", "VisitIndicators", "VisitRecords", "VisitSession")
 
 # Tabs that can receive Kobo submissions (each has a trailing `kobo_id` column)
 KOBO_SHEETS = ("DQA", "SSM", "LV")
+
+
+def _col_letter(n: int) -> str:
+    """1 -> A, 26 -> Z, 27 -> AA (some tabs now have more than 26 columns)."""
+    s = ""
+    while n > 0:
+        n, r = divmod(n - 1, 26)
+        s = chr(65 + r) + s
+    return s
 
 
 def is_configured() -> bool:
@@ -367,14 +394,14 @@ def ensure_kobo_columns():
     """Tabs created before Kobo support lack the trailing `kobo_id` column. Add the header
     in place (existing rows are untouched). Refuses if the header was customised, rather
     than guessing."""
-    for sheet in KOBO_SHEETS:
+    for sheet in KOBO_SHEETS + ("VisitTools", "VisitRCA", "VisitActions", "Competency"):      # tabs that gained trailing columns
         ws = _get_or_create_ws(sheet)
         expected = SHEET_COLUMNS[sheet]
         header = _wrap_gspread_errors(ws.row_values)(1)
         if header == expected:
             continue
         if header == expected[:len(header)]:
-            last = chr(ord("A") + len(expected) - 1)
+            last = _col_letter(len(expected))
             _wrap_gspread_errors(ws.update)(range_name=f"A1:{last}1", values=[expected])
         else:
             raise RuntimeError(
@@ -430,6 +457,21 @@ def save_competency_items(df: pd.DataFrame):
     get_all.clear()
 
 
+def get_topic_parts() -> pd.DataFrame:
+    df = get_all("TopicParts")
+    return df.drop(columns=["_row"], errors="ignore") if not df.empty else df
+
+
+def save_topic_parts(df: pd.DataFrame):
+    """Replace the whole topic library (Parts D/E/F + topic info)."""
+    cols = SHEET_COLUMNS["TopicParts"]
+    out = df.reindex(columns=cols).fillna("").astype(str)
+    ws = _get_or_create_ws("TopicParts")
+    _wrap_gspread_errors(ws.clear)()
+    _wrap_gspread_errors(ws.update)(range_name="A1", values=[cols] + out.values.tolist())
+    get_all.clear()
+
+
 def delete_competency_assessment(assessment_id: str, deleted_by: str = "") -> int:
     """Delete every row of one assessment. Rows imported from Kobo have their Kobo ID remembered
     so the next sync doesn't bring them back. Returns the number of rows removed."""
@@ -462,7 +504,7 @@ def set_cells(sheet: str, updates: list):
     cols = SHEET_COLUMNS[sheet]
     data = []
     for row, col, value in updates:
-        letter = chr(ord("A") + cols.index(col))                # tabs here stay under 26 columns
+        letter = _col_letter(cols.index(col) + 1)
         data.append({"range": f"{letter}{row}", "values": [[str(value)]]})
     ws = _get_or_create_ws(sheet)
     _wrap_gspread_errors(ws.batch_update)(data)

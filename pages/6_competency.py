@@ -52,7 +52,9 @@ if _flow and _flow.get("next") == "SSM" and _flow.get("stage") == "tools":
         st.markdown(f"**Support supervision visit — step 1 of 3: visit tools** · {_flow['facility']} · "
                     f"visit reference `{_flow.get('visit_ref', '')}`")
         st.markdown("Attendance, root cause analysis, action plan, IPI milestone mapping and routine indicator "
-                    "mapping — fill the sections in order in Kobo, then come back here for the competency assessment.")
+                    "mapping — fill the sections in order in Kobo. When the form asks **\"continue to the competency "
+                    "assessment?\"**, choose **No** if you will do it here in the app (choose **Yes** to do it in Kobo "
+                    "instead), then come back here.")
         _tools_url = kobo.prefilled_link("TOOLS", _flow["facility"], "", extra={"visit_ref": _flow.get("visit_ref", "")})
         st.link_button("📲 Open the visit tools form in Kobo ↗", _tools_url or "", use_container_width=True,
                         type="primary", disabled=not _tools_url)

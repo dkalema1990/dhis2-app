@@ -5,6 +5,8 @@ import plotly.express as px
 import streamlit as st
 
 import auth
+import competency as comp
+import mentorship
 import gsheets
 import kobo
 import visit_tools as vt
@@ -17,8 +19,10 @@ can_act = role in ("submitter", "admin")
 is_admin = role == "admin"
 
 st.title("🧭 Visit tools")
-st.caption("Attendance, root cause analysis, action plans, IPI milestone mapping and routine indicator mapping "
-           "from support supervision / mentorship visits. They're filled in Kobo and arrive here after **Sync now**.")
+st.caption("Attendance, root cause analyses, action plans, IPI milestone mapping and routine indicator mapping "
+           "from support supervision / mentorship visits. They're filled in the Kobo visit form and arrive here "
+           "after **Sync now**. (Competency assessments and support supervision reports from the same form go to "
+           "their own pages.)")
 
 _flash = st.session_state.pop("vt_flash", None)
 if _flash:
@@ -30,6 +34,8 @@ if not gsheets.is_configured():
 
 try:
     ipi_all, routine_all = vt.load_lists(seed=can_act)          # fills the sample lists the first time
+    items_all = comp.load_items(seed=can_act)                   # the competency checklist (part of the visit form)
+    parts_all = gsheets.get_topic_parts()                       # Parts D/E/F of the topic tools
 except RuntimeError as e:
     st.error(f"Couldn't load the indicator lists: {e}")
     st.stop()
@@ -72,7 +78,7 @@ def _show_files(links: list, title: str, key_prefix: str):
             st.link_button(f"Open {title} {i} ↗", url)
 
 
-tab_res, tab_setup = st.tabs(["📊 Results", "⚙️ Lists & Kobo form"])
+tab_res, tab_ment, tab_topics, tab_setup = st.tabs(["📊 Results", "🧾 Mentorship results", "📚 Mentorship topics", "⚙️ Lists & Kobo form"])
 
 # =====================================================================
 # Results
@@ -149,16 +155,28 @@ with tab_res:
             if v_tools.empty:
                 st.info("Nothing to show.")
             else:
-                st.dataframe(v_tools[["visit_date", "facility", "rca_method", "rca_problem", "rca_root_cause", "visit_ref"]],
-                             hide_index=True, use_container_width=True)
-                meth = v_tools.groupby("rca_method").size().reset_index(name="visits")
-                if len(meth) > 1:
-                    st.caption("Methods used: " + ", ".join(f"{r.rca_method or '—'} ({r.visits})" for r in meth.itertuples()))
+                show = v_tools.copy()
+                if "rca_count" not in show.columns:
+                    show["rca_count"] = ""
+                st.dataframe(show[["visit_date", "facility", "rca_count", "rca_method", "rca_problem", "rca_root_cause", "visit_ref"]],
+                             hide_index=True, use_container_width=True,
+                             column_config={"rca_count": st.column_config.TextColumn("analyses"),
+                                            "rca_method": "methods", "rca_problem": "problems", "rca_root_cause": "root causes"})
+                n_an = int(pd.to_numeric(show["rca_count"], errors="coerce").fillna(0).sum())
+                st.caption(f"{n_an} root cause analysis(es) across {len(show)} visit(s). A visit can have several — "
+                           "each with its own problem and method.")
                 if pick != "All visits" and not v_rca.empty:
-                    st.markdown("**The full analysis for this visit**")
-                    st.dataframe(v_rca[["method", "section", "item", "text"]], hide_index=True, use_container_width=True)
+                    r = v_rca.copy()
+                    if "analysis_no" not in r.columns:
+                        r["analysis_no"] = 1
+                    r["analysis_no"] = pd.to_numeric(r["analysis_no"], errors="coerce").fillna(1).astype(int)
+                    for n, grp in r.groupby("analysis_no"):
+                        prob = grp.loc[grp["section"] == "Problem", "text"]
+                        head = f"Analysis {n} — {grp['method'].iloc[0]}" + (f": {str(prob.iloc[0])[:70]}" if len(prob) else "")
+                        with st.expander(head, expanded=True):
+                            st.dataframe(grp[["section", "item", "text"]], hide_index=True, use_container_width=True)
                 elif pick == "All visits":
-                    st.caption("Pick one visit above to see its full analysis.")
+                    st.caption("Pick one visit above to see each of its analyses in full.")
 
         with t_act:
             if v_act.empty:
@@ -232,6 +250,73 @@ with tab_res:
 # =====================================================================
 # Lists & Kobo form (admin)
 # =====================================================================
+with tab_ment:
+    st.caption("What was recorded in the topic tools: facility systems (Part D), data verification (Part E), record review "
+               "(Part F), mentorship session and QI link (Parts G, I, J) and the follow-up of last visit's actions (Part B).")
+    _m = {"VisitSession": "Session summary (G, I, J)", "VisitSystems": "Systems (D)", "VisitIndicators": "Data verification (E)",
+          "VisitRecords": "Record review (F)", "VisitFollowUp": "Previous actions (B)"}
+    _sub = st.tabs(list(_m.values()))
+    for _t, (_name, _label) in zip(_sub, _m.items()):
+        with _t:
+            _df = gsheets.get_table(_name)
+            if _df.empty:
+                st.info("Nothing here yet. It arrives after **Sync now** once a visit has been submitted in Kobo.")
+                continue
+            _df = _df.drop(columns=[c for c in ("_row", "kobo_id") if c in _df.columns])
+            _facs = sorted(_df["facility"].astype(str).unique()) if "facility" in _df.columns else []
+            _pick = st.multiselect("Facility", _facs, key=f"vtm_fac_{_name}")
+            if _pick:
+                _df = _df[_df["facility"].astype(str).isin(_pick)]
+            st.dataframe(_df, use_container_width=True, hide_index=True)
+            st.download_button("⬇️ Download (CSV)", _df.to_csv(index=False).encode("utf-8"), f"{_name}.csv", "text/csv", key=f"vtm_dl_{_name}")
+            if _name == "VisitSession" and "systems_pct" in _df.columns:
+                _s = _df.assign(systems_pct=pd.to_numeric(_df["systems_pct"], errors="coerce")).dropna(subset=["systems_pct"])
+                if not _s.empty:
+                    _fig = px.bar(_s, x="facility", y="systems_pct", color="topic", barmode="group",
+                                  labels={"systems_pct": "Systems score (%)", "facility": ""})
+                    _fig.add_hline(y=85, line_dash="dot"); _fig.add_hline(y=70, line_dash="dot")
+                    st.plotly_chart(_fig, use_container_width=True)
+                    st.caption("Dotted lines: Green at 85% and above, Amber 70-84%, Red below 70%.")
+
+with tab_topics:
+    st.markdown("Each **topic** is one mentorship and competency assessment tool (for example *MT-01 HIV Testing Services and "
+                "Prevention*). Upload the Word (.docx) tools here — the app reads Part C (competency items), Part D (systems "
+                "standards), Part E (data verification indicators) and Part F (record review columns) and builds them into the "
+                "Kobo form. In Kobo, choosing the topic shows that topic's tool.")
+    _summ = mentorship.topic_summary(items_all, parts_all)
+    if _summ.empty:
+        st.info("No topics yet.")
+    else:
+        st.dataframe(_summ, use_container_width=True, hide_index=True)
+        st.caption("Rows with 0 in D/E/F are topics that only have a competency checklist (for example the built-in samples).")
+    if not is_admin:
+        st.caption("Only an admin can import or replace topics.")
+    else:
+        _ups = st.file_uploader("Upload one or more topic tools (.docx)", type=["docx"], accept_multiple_files=True, key="vt_topic_up")
+        _parsed = []
+        for _f in _ups or []:
+            try:
+                _tp = mentorship.parse_docx(_f.getvalue(), _f.name)
+                _parsed.append(_tp)
+                st.success(f"**{_tp['title']}** (code `{_tp['code']}`): {len(_tp['C'])} competency items · {len(_tp['D'])} systems standards · "
+                           f"{len(_tp['E'])} indicators · {len(_tp['F'])} record-review columns")
+            except Exception as e:
+                st.error(f"{_f.name}: couldn't read this tool — {e}")
+        if _parsed and st.button("📥 Import / replace these topics", type="primary", key="vt_topic_import"):
+            _it, _pa = items_all.copy(), mentorship.normalize_parts(parts_all)
+            for _tp in _parsed:
+                _it, _pa = mentorship.import_topic(_tp, _it, _pa)
+            try:
+                gsheets.save_competency_items(_it)
+                gsheets.save_topic_parts(_pa)
+                st.session_state["vt_flash"] = (f"Imported {len(_parsed)} topic(s). Now download the Kobo form again (Lists & Kobo form tab) "
+                                                "and replace it in Kobo.")
+                st.rerun()
+            except RuntimeError as e:
+                st.error(f"Couldn't save: {e}")
+        st.caption("Importing a topic with the same title replaces its items. Topics you no longer need (such as the samples) can be "
+                   "set to inactive on the Competency assessment page.")
+
 with tab_setup:
     if not is_admin:
         st.info("Only admins can edit the indicator lists or download the Kobo form.")
@@ -264,15 +349,21 @@ with tab_setup:
                     st.error(f"Couldn't save: {e}")
 
         st.divider()
-        st.markdown("**2. Get the Kobo form.** Built from the *saved* lists. Upload it to Kobo as a new project and "
-                    "deploy it. **Whenever you change the lists, download the form again and replace it in Kobo** — "
-                    "Kobo keeps the dropdown options it was deployed with.")
+        st.markdown("**2. Get the Kobo form.** One form for the whole visit: the visit tools (with a repeatable root "
+                    "cause analysis), then it asks *\"continue to the competency assessment?\"* (one block per health "
+                    "worker, from your competency checklist), then *\"continue to the support supervision report?\"*. "
+                    "Built from the *saved* lists. Upload it to Kobo as a new project and deploy it. "
+                    "**Whenever you change these lists or the competency checklist, download the form again and "
+                    "replace it in Kobo** — Kobo keeps the options it was deployed with.")
         try:
-            xls = vt.build_xlsform(ipi_all, routine_all)
+            xls = vt.build_xlsform(ipi_all, routine_all, items_all, parts_all)
             st.download_button("⬇️ Download Kobo form (XLSForm)", xls, "visit_tools_form.xlsx",
                                "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", key="vt_dl_form")
-            st.caption(f"{int((ipi_all['active'] != 'no').sum())} active IPI indicators and "
-                       f"{int((routine_all['active'] != 'no').sum())} active routine indicators.")
+            n_items = int((items_all["active"] != "no").sum()) if not items_all.empty else 0
+            st.caption(f"{int((ipi_all['active'] != 'no').sum())} active IPI indicators, "
+                       f"{int((routine_all['active'] != 'no').sum())} active routine indicators"
+                       + (f" and {n_items} competency items." if n_items else
+                          ". The competency checklist is empty, so the form has no competency part yet."))
         except ValueError as e:
             st.error(f"Can't build the Kobo form yet: {e}")
         except ImportError:
@@ -283,9 +374,10 @@ with tab_setup:
         st.markdown("**3. Connect the Kobo project** by adding this to your Streamlit secrets "
                     "(same file as the other Kobo forms):")
         st.code('[kobo.forms.TOOLS]\nasset_uid = "your-visit-tools-project-id"\n'
-                'form_url = "paste the Collect data link here"   # adds the visit-tools step to the dashboard buttons',
+                'form_url = "paste the Collect data link here"   # the dashboard buttons open this all-in-one form',
                 language="toml")
-        st.caption("The root cause analysis methods and fishbone categories are set in `visit_tools.py`.")
+        st.caption("The root cause analysis methods and fishbone categories are set in `visit_tools.py`. The "
+                   "separate competency and support supervision Kobo forms still work on their own, outside a full visit.")
 
         with st.expander("Reset the lists to the samples"):
             st.warning("This replaces both lists with the built-in samples. Existing submissions are kept.")

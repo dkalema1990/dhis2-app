@@ -296,13 +296,23 @@ def sync_form(form_key: str) -> dict:
         raise RuntimeError("The competency checklist is empty, so Kobo submissions can't be read. Open the "
                            "Competency assessment page once as an admin (it creates the checklist), then sync again.")
 
-    pending = {t: [] for t in (visit_tools.MAIN_TAB,) + visit_tools.CHILD_TABS}
+    pending = {t: [] for t in (visit_tools.MAIN_TAB,) + visit_tools.CHILD_TABS + ("Competency", "SSM")}
     child_known, ipi_labels, routine_labels = {}, {}, {}
+    comp_known = comp_deleted = ssm_known = ssm_deleted = set()
+    comp_assessments = ssm_reports = comp_empty = 0
     if form_key == "TOOLS":
         child_known = {t: gsheets.get_kobo_ids(t) for t in visit_tools.CHILD_TABS}
         ipi_df, rout_df = visit_tools.load_lists()                  # restore readable indicator names
         ipi_labels = dict(zip(ipi_df["ipi_id"], ipi_df["indicator"]))
         routine_labels = dict(zip(rout_df["indicator_id"], rout_df["indicator"]))
+        parts_df = gsheets.get_topic_parts()                        # Parts D/E/F of the topic tools
+        items = competency.load_items()                              # the competency part of the visit form
+        if items.empty and any(visit_tools._repeat(s_, "rep_competency") for s_ in subs):
+            raise RuntimeError("These visits include competency assessments, but the competency checklist is empty. "
+                               "Open the Competency assessment page once as an admin (it creates the checklist), "
+                               "then sync again.")
+        comp_known, comp_deleted = gsheets.get_kobo_ids("Competency"), gsheets.get_kobo_deleted_ids("Competency")
+        ssm_known, ssm_deleted = gsheets.get_kobo_ids("SSM"), gsheets.get_kobo_deleted_ids("SSM")
 
     new_records, new_subs, already, skipped_deleted, empty, seen = [], 0, 0, 0, 0, set()
     for sub in subs:
@@ -318,11 +328,24 @@ def sync_form(form_key: str) -> dict:
             used: set = set()
             tables = visit_tools.submission_to_tables(
                 sub, lambda names, _s=sub, _u=used: _links_by_filenames(_s, names, _server(cfg), _u),
-                ipi_labels, routine_labels)
+                ipi_labels, routine_labels, parts_df)
             for tab in visit_tools.CHILD_TABS:
                 if sid not in child_known[tab]:                      # a retry after a partial save never duplicates
                     pending[tab].extend(tables[tab])
             pending[visit_tools.MAIN_TAB].extend(tables[visit_tools.MAIN_TAB])
+            # the competency assessments and the support supervision report done inside the same visit
+            c_rows, c_empty = visit_tools.competency_rows_from_visit(sub, items)
+            fresh = [r for r in c_rows if r["kobo_id"] not in comp_known and r["kobo_id"] not in comp_deleted]
+            pending["Competency"].extend(fresh)
+            comp_assessments += len({r["assessment_id"] for r in fresh})
+            comp_empty += c_empty
+            ssm_row = visit_tools.ssm_row_from_visit(
+                sub, lambda names, _s=sub, _u=used: _links_by_filenames(_s, names, _server(cfg), _u),
+                visit_tools.competency_average(c_rows), _parse_location(sub),
+                tables[visit_tools.MAIN_TAB][0]["attendance_upload_links"])
+            if ssm_row and sid not in ssm_known and sid not in ssm_deleted:
+                pending["SSM"].append(ssm_row)
+                ssm_reports += 1
             new_subs += 1
         elif form_key == "COMP":
             rows = competency.submission_to_rows(sub, items, form.get("map") or {})
@@ -339,12 +362,16 @@ def sync_form(form_key: str) -> dict:
         rows_added = 0
         for tab in visit_tools.CHILD_TABS:                           # the visit row goes LAST: it marks the visit as imported
             rows_added += gsheets.append_kobo_rows(tab, pending[tab])
+        gsheets.append_kobo_rows("Competency", pending["Competency"])
+        gsheets.append_kobo_rows("SSM", pending["SSM"])
         gsheets.append_kobo_rows(visit_tools.MAIN_TAB, pending[visit_tools.MAIN_TAB])
     else:
         rows_added = gsheets.append_kobo_rows(sheet, new_records)
     res = {"fetched": len(subs), "new": new_subs, "already_in_sheet": already, "deleted_skipped": skipped_deleted}
     if form_key in ("COMP", "TOOLS"):
         res.update(rows=rows_added, empty=empty)
+    if form_key == "TOOLS":
+        res.update(assessments=comp_assessments, reports=ssm_reports, comp_empty=comp_empty)
     return res
 
 
@@ -395,8 +422,9 @@ def sync_all() -> dict:
 # ---------------------------------------------------------------------
 # The steps of a support supervision visit that are done in Kobo, in order.
 STEP_INFO = {
-    "TOOLS": ("Visit tools", "Attendance, root cause analysis, action plan, IPI milestone mapping and routine "
-                             "indicator mapping — fill the sections in order."),
+    "TOOLS": ("Support supervision visit (all-in-one form)",
+              "The visit tools first; then it asks whether to continue to the competency assessment of each "
+              "health worker, and then to the support supervision report."),
     "COMP": ("Competency assessment", "Submit one form per health worker."),
     "SSM": ("Support supervision / mentorship form", "The visit report. Leave the score blank to have it filled in "
                                                      "from the competency average."),
@@ -404,16 +432,19 @@ STEP_INFO = {
 
 
 def visit_step_keys() -> list:
-    """Visit steps that have a Kobo web-form link in the secrets, in the order they're done."""
+    """Kobo steps of a visit that have a web-form link in the secrets, in the order they're done. When the
+    all-in-one visit form (TOOLS) is linked it already contains the competency assessment and the support
+    supervision report, so it is the only step."""
     forms = config().get("forms") or {}
-    return [k for k in ("TOOLS", "COMP", "SSM") if isinstance(forms.get(k), dict) and forms[k].get("form_url")]
+    linked = [k for k in ("TOOLS", "COMP", "SSM") if isinstance(forms.get(k), dict) and forms[k].get("form_url")]
+    return ["TOOLS"] if "TOOLS" in linked else linked
 
 
 def visit_steps(facility: str, data_element: str, period, visit_ref: str) -> list:
     """The ordered Kobo steps of a visit, each with a prefilled link carrying the SAME visit reference."""
     out = []
     for key in visit_step_keys():
-        url = prefilled_link(key, facility, data_element if key == "SSM" else "", period if key == "SSM" else None,
+        url = prefilled_link(key, facility, data_element if key in ("SSM", "TOOLS") else "", period if key == "SSM" else None,
                              extra={"visit_ref": visit_ref})
         title, note = STEP_INFO[key]
         out.append({"key": key, "title": title, "note": note, "url": url})
@@ -456,8 +487,12 @@ def _show_results(results: dict):
             extra = f", {res['deleted_skipped']} skipped (deleted in the app)" if res["deleted_skipped"] else ""
             if res.get("empty"):
                 extra += f", {res['empty']} had no recognisable answers (was the checklist changed after the form was deployed?)"
+            if res.get("comp_empty"):
+                extra += f", {res['comp_empty']} competency assessment(s) had no recognisable answers (checklist changed after the form was deployed?)"
             what = (f"{res['new']} new assessment(s) ({res.get('rows', 0)} rows)" if sheet == "COMP"
-                    else f"{res['new']} new visit(s) ({res.get('rows', 0)} rows in the tool tabs)" if sheet == "TOOLS"
+                    else (f"{res['new']} new visit(s) ({res.get('rows', 0)} rows in the tool tabs"
+                          + (f", {res['assessments']} competency assessment(s)" if res.get("assessments") else "")
+                          + (f", {res['reports']} support supervision report(s)" if res.get("reports") else "") + ")") if sheet == "TOOLS"
                     else f"{res['new']} new")
             st.success(f"**{label}:** {what}, {res['already_in_sheet']} already imported{extra} "
                        f"— {res['fetched']} in Kobo.")

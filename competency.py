@@ -53,7 +53,7 @@ TYPE_CODE = {l: c for c, l in ASSESSMENT_TYPES}
 ITEM_COLS = ["item_id", "service_area", "domain", "competency", "active"]
 COMP_COLS = ["assessment_id", "visit_ref", "facility", "mentee_name", "cadre", "service_area",
              "assessment_type", "assessment_date", "item_id", "competency", "score", "assessor",
-             "comments", "timestamp", "kobo_id"]
+             "comments", "timestamp", "kobo_id", "unit", "phone", "on_cohort"]
 
 # Names used by the generated Kobo form for its own questions — items can't reuse them.
 RESERVED_NAMES = {"facility", "mentee_name", "cadre", "service_area", "assessment_type",
@@ -276,10 +276,12 @@ def summarize(df: pd.DataFrame) -> pd.DataFrame:
                   mentee_name=("mentee_name", "first"), cadre=("cadre", "first"),
                   service_area=("service_area", "first"), assessment_type=("assessment_type", "first"),
                   assessment_date=("assessment_date", "first"), date_dt=("date_dt", "first"),
-                  assessor=("assessor", "first"), scored=("scored", "sum"), competent=("competent", "sum"))
+                  assessor=("assessor", "first"), scored=("scored", "sum"), competent=("competent", "sum"),
+                  points=("score_num", "sum"))
              .reset_index())
     out["gaps"] = out["scored"] - out["competent"]
-    out["pct_competent"] = (out["competent"] / out["scored"] * 100).where(out["scored"] > 0).round(1)
+    # the tools' formula: points scored / (2 x applicable items) x 100  (NA items are left out)
+    out["pct_competent"] = (out["points"] / (2 * out["scored"]) * 100).where(out["scored"] > 0).round(1)
     return out[cols].sort_values("date_dt", ascending=False, na_position="last").reset_index(drop=True)
 
 
@@ -480,6 +482,7 @@ def submission_to_rows(sub: dict, items_df: pd.DataFrame, column_map: dict | Non
         "assessment_date": meta("assessment_date") or str(sub.get("_submission_time", ""))[:10],
         "assessor": meta("assessor") or str(sub.get("_submitted_by") or ""),
         "comments": meta("comments"),
+        "unit": meta("mentee_unit"), "phone": meta("mentee_phone"), "on_cohort": meta("on_cohort"),
         "timestamp": str(sub.get("_submission_time", "")),
         "kobo_id": kobo_id,
     }
