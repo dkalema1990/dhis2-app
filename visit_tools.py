@@ -64,6 +64,8 @@ MENTOR_METHODS = [("side_by_side", "Side-by-side / bedside"), ("case_review", "C
 QI_STATUS = [("registered", "Registered"), ("not_yet", "Not yet registered (agree aim today)")]
 RATINGS = [("Green", "Green (85% or more) - sustain"), ("Amber", "Amber (70-84%) - targeted mentorship"),
            ("Red", "Red (below 70%) - intensive mentorship and escalation")]
+VISIT_SOURCES = [("standalone", "Standalone"), ("dashboard", "Linked to DHIS2 performance")]
+SOURCE_LABEL = dict(VISIT_SOURCES)
 SYS_SCALE = [("2", "Fully met"), ("1", "Partially met"), ("0", "Not met"), ("NA", "Not applicable")]
 SYS_LABEL = dict(SYS_SCALE)
 PART_A_COLS = ["kcca_division", "facility_level", "visit_type", "visit_mode", "units_visited", "priority_facility",
@@ -187,6 +189,13 @@ def facility_choices(df: pd.DataFrame | None) -> list:
         seen.add(key)
         out.append((key, key if not p or is_dup else f"{r['name']} ({p})"))
     return sorted(out, key=lambda x: x[1].lower())
+
+
+def visit_source_of(flat: dict) -> str:
+    """'Linked to DHIS2 performance' when the visit was opened from the dashboard button (or names a data element),
+    otherwise 'Standalone'."""
+    linked = _txt(flat.get("visit_source")) == "dashboard" or bool(_txt(flat.get("data_element")))
+    return SOURCE_LABEL["dashboard" if linked else "standalone"]
 
 
 def _facility_of(flat: dict) -> str:
@@ -334,6 +343,9 @@ def build_xlsform(ipi_df: pd.DataFrame, routine_df: pd.DataFrame, items_df: pd.D
         _r("text", "prev_actions", "Previous visit's action plan (for reference)",
            "Filled in automatically. Mark the status of each action in the follow-up table under the action plan (section 3).",
            default="'" + NOT_LOADED + "'", appearance="multiline", ro="yes"),
+        _r("select_one visit_sources", "visit_source", "How is this visit being done?",
+           "Set automatically: 'Linked' when opened from the dashboard button, otherwise 'Standalone'.",
+           default="'standalone'", ro="yes"),
         _r("text", "assessor", "Your name", required="yes"),
 
         # ---- Part A: visit information (mentorship tool)
@@ -525,6 +537,7 @@ def build_xlsform(ipi_df: pd.DataFrame, routine_df: pd.DataFrame, items_df: pd.D
     ch += [("visit_modes", c, l) for c, l in VISIT_MODES] + [("followup_status", c, l) for c, l in FOLLOWUP_STATUS]
     ch += [("escalate_to", c, l) for c, l in ESCALATE] + [("mentor_methods", c, l) for c, l in MENTOR_METHODS]
     ch += [("qi_status", c, l) for c, l in QI_STATUS] + [("ratings", c, l) for c, l in RATINGS]
+    ch += [("visit_sources", c, l) for c, l in VISIT_SOURCES]
     ch += [("topics", competency.slug(t), t) for t in topic_titles]
     if topic_titles:
         ch += [("sys_scale", c, l) for c, l in SYS_SCALE]
@@ -700,6 +713,7 @@ def submission_to_tables(sub: dict, links_fn=None, ipi_labels: dict | None = Non
             "rca_root_cause": " | ".join(roots), "rca_count": n_rca,
             "action_count": len(actions), "ipi_count": len(ipi), "routine_count": len(routine),
             "comments": _txt(flat.get("comments"))}
+    main["visit_source"] = visit_source_of(flat)
     lab = {"kcca_division": {competency.slug(d): d for d in DIVISIONS}, "facility_level": dict(FACILITY_LEVELS),
            "visit_type": dict(VISIT_TYPES), "visit_mode": dict(VISIT_MODES), "priority_facility": dict(YES_NO)}
     for k in PART_A_COLS:
@@ -839,7 +853,7 @@ def ssm_row_from_visit(sub: dict, links_fn, avg_pct, loc=("", "", ""), attendanc
             "kobo_id": str(sub.get("_uuid") or sub.get("_id") or "").strip(),
             "latitude": loc[0], "longitude": loc[1], "gps_accuracy_m": loc[2],
             "photo_links": LINK_SEP.join(links_fn(photos)), "attendance_links": attendance_links,
-            "visit_ref": _txt(flat.get("visit_ref"))}
+            "visit_ref": _txt(flat.get("visit_ref")), "visit_source": visit_source_of(flat)}
 
 
 # ---------------------------------------------------------------------

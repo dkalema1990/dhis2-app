@@ -48,7 +48,7 @@ SHEET_COLUMNS = {
             "follow_up_date", "submitted_by", "timestamp", "pushed_to_dhis2", "kobo_id"] + EVIDENCE_COLUMNS,
     "SSM": ["facility", "data_element", "focus_area", "findings", "mentorship_given",
             "score", "recommendations", "responsible_person", "follow_up_date",
-            "submitted_by", "timestamp", "kobo_id"] + EVIDENCE_COLUMNS + ["visit_ref"],
+            "submitted_by", "timestamp", "kobo_id"] + EVIDENCE_COLUMNS + ["visit_ref", "visit_source"],
     "LV": ["facility", "data_element", "best_practice", "enabling_factors",
            "lessons_learned", "dissemination_plan", "responsible_person",
            "follow_up_date", "submitted_by", "timestamp", "kobo_id"] + EVIDENCE_COLUMNS,
@@ -70,7 +70,7 @@ SHEET_COLUMNS = {
                    "ipi_count", "routine_count", "comments", "timestamp", "kobo_id", "rca_count",
                    # Part A of the mentorship tool
                    "kcca_division", "facility_level", "visit_type", "visit_mode", "units_visited", "priority_facility",
-                   "lead_mentor", "co_mentor", "facility_in_charge", "time_in", "time_out"],
+                   "lead_mentor", "co_mentor", "facility_in_charge", "time_in", "time_out", "visit_source"],
     "VisitAttendance": ["visit_ref", "facility", "visit_date", "fullname", "cadre", "email", "phone", "timestamp", "kobo_id"],
     "VisitRCA": ["visit_ref", "facility", "visit_date", "method", "section", "item", "text", "timestamp", "kobo_id", "analysis_no"],
     "VisitActions": ["visit_ref", "facility", "visit_date", "challenge", "corrective_action", "responsible_person",

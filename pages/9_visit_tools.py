@@ -105,9 +105,16 @@ with tab_res:
     else:
         tools = tools.copy()
         tools["kobo_id"] = tools["kobo_id"].astype(str)
-        f1, f2 = st.columns(2)
+        if "visit_source" not in tools.columns:
+            tools["visit_source"] = ""
+        tools["visit_source"] = tools["visit_source"].replace("", "Standalone")      # visits from before this column existed
+        f1, f2, f3 = st.columns(3)
         fac_sel = f1.multiselect("Facility", sorted(tools["facility"].astype(str).unique()))
+        src_sel = f3.multiselect("Visit type", [l for _, l in vt.VISIT_SOURCES], key="vt_src",
+                                 help="Standalone = Kobo link used on its own. Linked = opened from the DHIS2 performance dashboard.")
         view = tools[tools["facility"].isin(fac_sel)] if fac_sel else tools
+        if src_sel:
+            view = view[view["visit_source"].isin(src_sel)]
         view = view.sort_values("visit_date", ascending=False)
         labels = {f"{r.visit_date} · {r.facility} · {r.visit_ref or r.kobo_id[:8]}": r.kobo_id for r in view.itertuples()}
         pick = f2.selectbox("Visit", ["All visits"] + list(labels), key="vt_visit")
@@ -124,7 +131,9 @@ with tab_res:
         v_rout = vt.routine_with_pct(v_rout) if not v_rout.empty else v_rout
 
         k1, k2, k3, k4, k5 = st.columns(5)
-        k1.metric("Visits", len(v_tools))
+        k1.metric("Visits", len(v_tools),
+                  help=f"{int((v_tools['visit_source'] == 'Standalone').sum())} standalone, "
+                       f"{int((v_tools['visit_source'] != 'Standalone').sum())} linked to DHIS2 performance")
         k2.metric("Attendees recorded", len(v_att))
         k3.metric("Actions planned", len(v_act))
         k4.metric("Overdue actions", int((v_act["status"] == "Overdue").sum()) if not v_act.empty else 0)

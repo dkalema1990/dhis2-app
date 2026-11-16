@@ -445,7 +445,7 @@ def visit_steps(facility: str, data_element: str, period, visit_ref: str, prev_a
     out = []
     for key in visit_step_keys():
         url = prefilled_link(key, facility, data_element if key in ("SSM", "TOOLS") else "", period if key == "SSM" else None,
-                             extra={"visit_ref": visit_ref, **({"prev_actions": prev_actions} if key == "TOOLS" else {})})
+                             extra={"visit_ref": visit_ref, **({"prev_actions": prev_actions, "visit_source": "dashboard"} if key == "TOOLS" else {})})
         title, note = STEP_INFO[key]
         out.append({"key": key, "title": title, "note": note, "url": url})
     return out
