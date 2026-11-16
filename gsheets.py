@@ -166,21 +166,34 @@ def _spreadsheet():
 
 @st.cache_resource(show_spinner=False)
 @_wrap_gspread_errors
-def _get_or_create_ws(name: str):
-    """Cached as a resource: the worksheet lookup + header check only happens
-    once per running app process, not on every Streamlit rerun. This is the
-    single biggest fix for hitting Google Sheets' read-quota — without this,
-    every click anywhere in the app re-reads every worksheet's header row."""
+def _sheet_handles() -> dict:
+    """All worksheet handles, found with just TWO read requests (the tab list + every header row in one
+    batch), once per running app process. Looking tabs up one by one used 2 reads per tab, and with ~30 tabs
+    that alone exceeded Google's 60-reads-a-minute limit when the app started."""
     ss = _spreadsheet()
-    try:
-        ws = ss.worksheet(name)
-    except Exception:
-        ws = ss.add_worksheet(title=name, rows=2000, cols=len(SHEET_COLUMNS[name]) + 2)
+    handles = {ws.title: ws for ws in ss.worksheets()}                       # read 1
+    present = [n for n in SHEET_COLUMNS if n in handles]
+    blank = set(present)
+    if present:
+        res = ss.values_batch_get([f"'{n}'!1:1" for n in present])           # read 2
+        for n, vr in zip(present, res.get("valueRanges", [])):
+            if vr.get("values") and any(vr["values"][0]):
+                blank.discard(n)
+    for n in blank:                                                         # a tab with no header row
+        handles[n].append_row(SHEET_COLUMNS[n])
+    return handles
+
+
+@_wrap_gspread_errors
+def _get_or_create_ws(name: str):
+    """The worksheet, created with its header row if it doesn't exist yet. Handles are cached, so a rerun
+    costs no Google read requests."""
+    handles = _sheet_handles()
+    if name not in handles:
+        ws = _spreadsheet().add_worksheet(title=name, rows=2000, cols=len(SHEET_COLUMNS[name]) + 2)
         ws.append_row(SHEET_COLUMNS[name])
-        return ws
-    if not ws.row_values(1):
-        ws.append_row(SHEET_COLUMNS[name])
-    return ws
+        handles[name] = ws
+    return handles[name]
 
 
 def init_sheets():
