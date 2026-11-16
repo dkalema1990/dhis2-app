@@ -440,12 +440,12 @@ def visit_step_keys() -> list:
     return ["TOOLS"] if "TOOLS" in linked else linked
 
 
-def visit_steps(facility: str, data_element: str, period, visit_ref: str) -> list:
+def visit_steps(facility: str, data_element: str, period, visit_ref: str, prev_actions: str = "") -> list:
     """The ordered Kobo steps of a visit, each with a prefilled link carrying the SAME visit reference."""
     out = []
     for key in visit_step_keys():
         url = prefilled_link(key, facility, data_element if key in ("SSM", "TOOLS") else "", period if key == "SSM" else None,
-                             extra={"visit_ref": visit_ref})
+                             extra={"visit_ref": visit_ref, **({"prev_actions": prev_actions} if key == "TOOLS" else {})})
         title, note = STEP_INFO[key]
         out.append({"key": key, "title": title, "note": note, "url": url})
     return out

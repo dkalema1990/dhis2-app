@@ -160,12 +160,12 @@ def _active(df: pd.DataFrame) -> pd.DataFrame:
 # The Kobo form (XLSForm), generated from the lists above
 # ---------------------------------------------------------------------
 _SURVEY_COLS = ["type", "name", "label", "hint", "required", "relevant", "default", "appearance",
-                "constraint", "constraint_message", "calculation"]
+                "constraint", "constraint_message", "calculation", "read_only"]
 
 
 def _r(type_, name="", label="", hint="", required="", relevant="", default="", appearance="",
-       constraint="", cmsg="", calc=""):
-    return [type_, name, label, hint, required, relevant, default, appearance, constraint, cmsg, calc]
+       constraint="", cmsg="", calc="", ro=""):
+    return [type_, name, label, hint, required, relevant, default, appearance, constraint, cmsg, calc, ro]
 
 
 
@@ -297,6 +297,9 @@ def build_xlsform(ipi_df: pd.DataFrame, routine_df: pd.DataFrame, items_df: pd.D
         _r("text", "visit_ref", "Visit reference", "Filled in automatically. It ties together everything recorded in this visit — leave it as it is."),
         _r("date", "visit_date", "Date of the visit", required="yes", default="today()"),
         _r("text", "data_element", "Data element / service area of the visit (optional)", "Filled in automatically when opened from the dashboard."),
+        _r("text", "prev_actions", "Previous visit's action plan (for reference)",
+           "Filled in automatically. Mark the status of each action in the follow-up table under the action plan (section 3).",
+           relevant="${prev_actions} != ''", appearance="multiline", ro="yes"),
         _r("text", "assessor", "Your name", required="yes"),
 
         # ---- Part A: visit information (mentorship tool)
@@ -805,6 +808,88 @@ def ssm_row_from_visit(sub: dict, links_fn, avg_pct, loc=("", "", ""), attendanc
 # ---------------------------------------------------------------------
 # Analysis helpers
 # ---------------------------------------------------------------------
+# ---------------------------------------------------------------------
+# Previous visit's action plan: shown in the Kobo form and tracked in the app
+# ---------------------------------------------------------------------
+STATUS_LABEL = dict(FOLLOWUP_STATUS)
+NO_PREVIOUS = "No previous action plan for this facility."
+
+
+def action_key(kobo_id, n) -> str:
+    return f"{kobo_id}#{n}"
+
+
+def previous_plans(actions_df, status_df=None, followup_df=None) -> pd.DataFrame:
+    """Every action of every visit, numbered per visit, with its latest status: set in the app
+    (ActionStatus) if any, else what a later visit recorded in its follow-up table, else 'Not yet reviewed'."""
+    cols = ["action_key", "kobo_id", "visit_ref", "facility", "visit_date", "n", "challenge", "corrective_action",
+            "responsible_person", "timeline", "status", "comment"]
+    if actions_df is None or actions_df.empty:
+        return pd.DataFrame(columns=cols)
+    a = actions_df.copy().reset_index(drop=True)
+    a["n"] = a.groupby("kobo_id").cumcount() + 1
+    a["action_key"] = [action_key(k, n) for k, n in zip(a["kobo_id"], a["n"])]
+    st_map, cm_map = {}, {}
+    if status_df is not None and not status_df.empty:
+        for _, r in status_df.iterrows():                      # later rows win
+            st_map[str(r["action_key"])] = str(r["status"])
+            cm_map[str(r["action_key"])] = str(r.get("comment", ""))
+    fu_map = {}
+    if followup_df is not None and not followup_df.empty:
+        for _, r in followup_df.sort_values("visit_date").iterrows():
+            fu_map[(str(r["facility"]).strip().lower(), str(r["action"]).strip().lower())] = (str(r["status"]), str(r.get("comment", "")))
+    sts, cms = [], []
+    for _, r in a.iterrows():
+        k = r["action_key"]
+        if k in st_map and st_map[k]:
+            sts.append(st_map[k]); cms.append(cm_map.get(k, ""))
+            continue
+        fk = str(r["facility"]).strip().lower()
+        hit = fu_map.get((fk, str(r["corrective_action"]).strip().lower())) or fu_map.get((fk, str(r["challenge"]).strip().lower()))
+        sts.append(hit[0] if hit else "Not yet reviewed"); cms.append(hit[1] if hit else "")
+    a["status"], a["comment"] = sts, cms
+    return a.reindex(columns=cols)
+
+
+def latest_plan(plans: pd.DataFrame, facility: str, exclude_ref: str = "") -> pd.DataFrame:
+    """Actions of the facility's most recent earlier visit that had an action plan (empty if none)."""
+    if plans is None or plans.empty:
+        return pd.DataFrame(columns=plans.columns if plans is not None else [])
+    p = plans[plans["facility"].astype(str).str.strip().str.lower() == str(facility).strip().lower()]
+    if exclude_ref:
+        p = p[p["visit_ref"].astype(str) != str(exclude_ref)]
+    if p.empty:
+        return p
+    p = p.assign(_d=pd.to_datetime(p["visit_date"], errors="coerce"))
+    last = p.sort_values(["_d", "kobo_id"]).iloc[-1]["kobo_id"]
+    return p[p["kobo_id"] == last].drop(columns="_d")
+
+
+def plan_text(plan: pd.DataFrame, max_items: int = 12, max_chars: int = 1500) -> str:
+    """The note shown at the top of the Kobo form."""
+    if plan is None or plan.empty:
+        return NO_PREVIOUS
+    first = plan.iloc[0]
+    lines = [f"Previous visit: {str(first['visit_date'])[:10]}" + (f" ({first['visit_ref']})" if str(first["visit_ref"]) else "")]
+    rows = list(plan.itertuples())
+    for r in rows[:max_items]:
+        due = str(r.timeline)[:10]
+        lines.append(f"{r.n}. {r.challenge} -> {r.corrective_action} | {r.responsible_person or 'no owner'} | due {due or 'no date'} | {r.status}")
+    if len(rows) > max_items:
+        lines.append(f"... and {len(rows) - max_items} more (see the app).")
+    text = "\n".join(lines)
+    return text if len(text) <= max_chars else text[:max_chars - 30].rstrip() + "\n... (cut short, see the app)"
+
+
+def previous_actions_note(facility: str, exclude_ref: str = "") -> str:
+    """Text for the form's read-only 'previous actions' box, or '' if the Sheet can't be read."""
+    try:
+        plans = previous_plans(gsheets.get_table("VisitActions"), gsheets.get_table("ActionStatus"), gsheets.get_table("VisitFollowUp"))
+        return plan_text(latest_plan(plans, facility, exclude_ref))
+    except Exception:
+        return ""
+
+
 def action_status(timeline, today=None) -> str:
     d = pd.to_datetime(str(timeline)[:10], errors="coerce")
     if pd.isna(d):

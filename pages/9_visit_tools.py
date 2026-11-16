@@ -78,7 +78,7 @@ def _show_files(links: list, title: str, key_prefix: str):
             st.link_button(f"Open {title} {i} ↗", url)
 
 
-tab_res, tab_ment, tab_topics, tab_setup = st.tabs(["📊 Results", "🧾 Mentorship results", "📚 Mentorship topics", "⚙️ Lists & Kobo form"])
+tab_res, tab_ment, tab_follow, tab_topics, tab_setup = st.tabs(["📊 Results", "🧾 Mentorship results", "🔁 Action follow-up", "📚 Mentorship topics", "⚙️ Lists & Kobo form"])
 
 # =====================================================================
 # Results
@@ -277,6 +277,61 @@ with tab_ment:
                     _fig.add_hline(y=85, line_dash="dot"); _fig.add_hline(y=70, line_dash="dot")
                     st.plotly_chart(_fig, use_container_width=True)
                     st.caption("Dotted lines: Green at 85% and above, Amber 70-84%, Red below 70%.")
+
+with tab_follow:
+    st.caption("Track the action plans agreed at past visits. The most recent plan of a facility is also sent into the Kobo "
+               "visit form as a read-only note when you open it from the dashboard; a facility with no plan shows "
+               "\"No previous action plan for this facility.\"")
+    _plans = vt.previous_plans(gsheets.get_table("VisitActions"), gsheets.get_table("ActionStatus"), gsheets.get_table("VisitFollowUp"))
+    if _plans.empty:
+        st.info(vt.NO_PREVIOUS + " Plans appear here after a visit is submitted in Kobo and synced.")
+    else:
+        _open = _plans[~_plans["status"].isin(["Done"])].copy()
+        _open["due"] = _open["timeline"].map(vt.action_status)
+        k1, k2, k3 = st.columns(3)
+        k1.metric("Actions recorded", len(_plans))
+        k2.metric("Not yet done", len(_open))
+        k3.metric("Overdue", int((_open["due"] == "Overdue").sum()))
+        _facs = sorted(_plans["facility"].astype(str).unique())
+        _fac = st.selectbox("Facility", _facs, key="vt_fu_fac")
+        _fp = _plans[_plans["facility"].astype(str) == _fac].copy()
+        _visits = (_fp.drop_duplicates("kobo_id").sort_values("visit_date", ascending=False))
+        _labels = {r.kobo_id: f"{str(r.visit_date)[:10]} · {r.visit_ref or r.kobo_id[:8]}" for r in _visits.itertuples()}
+        _kid = st.selectbox("Visit", list(_labels), format_func=lambda k: _labels[k], key="vt_fu_visit")
+        _sel = _fp[_fp["kobo_id"] == _kid].reset_index(drop=True)
+        _opts = ["Not yet reviewed"] + [l for _, l in vt.FOLLOWUP_STATUS]
+        _sel["status"] = _sel["status"].where(_sel["status"].isin(_opts), "Not yet reviewed")
+        _show = _sel[["n", "challenge", "corrective_action", "responsible_person", "timeline", "status", "comment"]]
+        _ed = st.data_editor(_show, hide_index=True, use_container_width=True, key=f"vt_fu_ed_{_kid}",
+                             disabled=[c for c in _show.columns if c not in ("status", "comment")] if can_act else list(_show.columns),
+                             column_config={"n": "#", "challenge": "Challenge", "corrective_action": "Corrective action",
+                                            "responsible_person": "Responsible", "timeline": "Due",
+                                            "status": st.column_config.SelectboxColumn("Status", options=_opts, required=True),
+                                            "comment": "Comment"})
+        if can_act:
+            if st.button("💾 Save status", type="primary", key=f"vt_fu_save_{_kid}"):
+                _rows = []
+                for (_, old), (_, new) in zip(_show.iterrows(), _ed.iterrows()):
+                    if (old["status"], old["comment"]) != (new["status"], new["comment"]):
+                        _r = _sel.iloc[int(old["n"]) - 1]
+                        _rows.append({"action_key": _r["action_key"], "visit_ref": _r["visit_ref"], "facility": _fac,
+                                      "action": _r["corrective_action"], "status": "" if new["status"] == "Not yet reviewed" else new["status"],
+                                      "comment": new["comment"], "updated_by": display_name,
+                                      "updated_at": pd.Timestamp.now().isoformat(timespec="seconds")})
+                if not _rows:
+                    st.info("Nothing changed.")
+                else:
+                    try:
+                        gsheets.append_kobo_rows("ActionStatus", _rows)
+                        st.session_state["vt_flash"] = f"Saved {len(_rows)} action status update(s)."
+                        st.rerun()
+                    except RuntimeError as e:
+                        st.error(f"Couldn't save: {e}")
+        st.markdown("**What the Kobo form will show for this facility next visit**")
+        st.code(vt.plan_text(vt.latest_plan(_plans, _fac)), language=None)
+        with st.expander("All actions not yet done, across facilities"):
+            st.dataframe(_open[["facility", "visit_date", "challenge", "corrective_action", "responsible_person", "timeline", "due", "status"]]
+                         .sort_values("timeline"), use_container_width=True, hide_index=True)
 
 with tab_topics:
     st.markdown("Each **topic** is one mentorship and competency assessment tool (for example *MT-01 HIV Testing Services and "

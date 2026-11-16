@@ -92,6 +92,8 @@ SHEET_COLUMNS = {
                      "records_total", "records_pct", "record_observation", "skills_mentored", "methods", "female",
                      "male", "hours", "job_aids", "good_practices", "qi_status", "qi_aim", "qi_baseline", "qi_value",
                      "qi_points", "qi_run_chart", "qi_change_idea", "qi_coach", "overall_rating", "timestamp", "kobo_id"],
+    # status of each action of a past visit's action plan, set in the app (latest row per action_key wins)
+    "ActionStatus": ["action_key", "visit_ref", "facility", "action", "status", "comment", "updated_by", "updated_at"],
     "IPIIndicators": ["ipi_id", "indicator", "active"],
     "RoutineIndicators": ["indicator_id", "indicator", "active"],
 }

@@ -10,6 +10,10 @@ import auth
 import gsheets
 import formulas
 import kobo
+try:
+    import visit_tools as _vt
+except Exception:          # the visit tools module is optional for the dashboard
+    _vt = None
 from dhis2_client import get_mock_facility_data, generate_periods
 
 
@@ -17,7 +21,8 @@ def _kobo_visit_dialog(facility, data_element, period, visit_ref):
     """The visit steps done in Kobo, in order: visit tools -> competency -> support supervision form.
     Kobo opens in a new tab and the app can't tell when you've submitted, so each next step unlocks once
     you confirm the previous one is finished. One visit reference goes into every form."""
-    steps = kobo.visit_steps(facility, data_element, period, visit_ref)
+    steps = kobo.visit_steps(facility, data_element, period, visit_ref,
+                             _vt.previous_actions_note(facility, visit_ref) if _vt else "")
     st.markdown(f"**{facility}** — do these in order  ·  visit reference `{visit_ref}`")
     unlocked = True
     for i, s in enumerate(steps, 1):
@@ -815,8 +820,9 @@ for _, row in summary.iterrows():
                         route(_act, _page)
                 if _act == "SSM" and "TOOLS" in _step_keys:
                     # the all-in-one visit form: tools -> (ask) competency -> (ask) support supervision report
-                    _visit_url = kobo.visit_steps(facility, de_for_action, st.session_state.get("period"),
-                                                  _new_visit_ref(facility))[0]["url"]
+                    _vref = _new_visit_ref(facility)
+                    _visit_url = kobo.visit_steps(facility, de_for_action, st.session_state.get("period"), _vref,
+                                                  _vt.previous_actions_note(facility, _vref) if _vt else "")[0]["url"]
                     _col.link_button("📲 Open Kobo visit form ↗", _visit_url, use_container_width=True,
                                       type=btn_type(_act), disabled=not can_act,
                                       help="One Kobo form for the whole visit: the visit tools, then it asks whether to "
