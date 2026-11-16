@@ -299,7 +299,7 @@ def build_xlsform(ipi_df: pd.DataFrame, routine_df: pd.DataFrame, items_df: pd.D
         _r("text", "data_element", "Data element / service area of the visit (optional)", "Filled in automatically when opened from the dashboard."),
         _r("text", "prev_actions", "Previous visit's action plan (for reference)",
            "Filled in automatically. Mark the status of each action in the follow-up table under the action plan (section 3).",
-           relevant="${prev_actions} != ''", appearance="multiline", ro="yes"),
+           default="'" + NOT_LOADED + "'", appearance="multiline", ro="yes"),
         _r("text", "assessor", "Your name", required="yes"),
 
         # ---- Part A: visit information (mentorship tool)
@@ -813,6 +813,7 @@ def ssm_row_from_visit(sub: dict, links_fn, avg_pct, loc=("", "", ""), attendanc
 # ---------------------------------------------------------------------
 STATUS_LABEL = dict(FOLLOWUP_STATUS)
 NO_PREVIOUS = "No previous action plan for this facility."
+NOT_LOADED = "The previous action plan was not loaded - this form was not opened from the visit button in the app."
 
 
 def action_key(kobo_id, n) -> str:
