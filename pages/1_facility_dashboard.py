@@ -10,6 +10,8 @@ import auth
 import gsheets
 import formulas
 import kobo
+import breakdowns as bd
+import json as _json
 try:
     import visit_tools as _vt
 except Exception:          # the visit tools module is optional for the dashboard
@@ -66,6 +68,8 @@ calc_builder_rendered = False  # builder is drawn in the pull settings (live) OR
 # Calculated-field definitions (shared, persisted). Loaded up here so the formula builder
 # can sit inside the DHIS2 pull settings, before the reporting period.
 calc_fields = gsheets.get_calculated_fields() if gsheets.is_configured() else pd.DataFrame()
+# Breakdown series (sex / age / other categories of a data element) - shared and persisted like calculated fields
+bd_saved = bd.normalize_series(gsheets.get_breakdowns() if gsheets.is_configured() else pd.DataFrame())
 
 
 def fetch_all_data_elements(client) -> pd.DataFrame:
@@ -123,6 +127,88 @@ def _calc_add(universe):
         st.session_state["calc_msg"] = ("error", f"Formula error: {e}")
     except RuntimeError as e:
         st.session_state["calc_msg"] = ("error", f"Couldn't save: {e}")
+
+
+def render_breakdown_builder(client, element_names, name_to_id):
+    """Pick a data element, then slice it by its own categories (sex, age, result ... whatever DHIS2 defines)."""
+    box = st.container(border=True)
+    with box:
+        st.markdown("**🧩 Breakdowns** — sex, age and other disaggregations of a data element")
+        _m = st.session_state.pop("bd_msg", None)
+        if _m:
+            (st.success if _m[0] == "success" else st.error)(_m[1])
+        if not bd_saved.empty:
+            st.caption("Saved breakdowns (pulled with the data element and usable in calculated fields):")
+            for _, s in bd_saved.iterrows():
+                c1, c2 = st.columns([6, 1])
+                c1.markdown(f"**{s['name']}**" + ("" if s["visible"] == "yes" else "  _(hidden — only feeds calculated fields)_"))
+                if can_act and c2.button("🗑️", key=f"bd_del_{s['name']}", help="Remove this breakdown"):
+                    try:
+                        gsheets.delete_breakdowns([s["name"]])
+                        st.rerun()
+                    except RuntimeError as e:
+                        st.error(f"Couldn't remove: {e}")
+        if not can_act:
+            st.info("Your role (`viewer`) can see breakdowns but not add or remove them.")
+            return
+        if not element_names:
+            st.info("Pick data elements first.")
+            return
+        de = st.selectbox("Data element to break down", element_names, key="bd_de")
+        cache = st.session_state.setdefault("bd_info", {})
+        if de not in cache:
+            if st.button("🔍 Load this element's breakdowns from DHIS2", key="bd_load"):
+                try:
+                    with st.spinner("Reading the categories of this data element..."):
+                        cache.update(bd.fetch_info(client, [name_to_id[de]]))
+                        cache.setdefault(de, {"categories": {}, "cocs": []})
+                    st.rerun()
+                except (RuntimeError, KeyError) as e:
+                    st.error(f"Couldn't read the breakdowns: {e}")
+            return
+        info = cache[de]
+        if not bd.has_breakdowns(info):
+            st.info("This data element has no sex, age or other breakdown in DHIS2 — only its total exists.")
+            return
+        st.caption(f"Category combination: **{info['category_combo']}** · {len(info['cocs'])} combinations")
+        chosen = {}
+        for cat, opts in info["categories"].items():
+            chosen[cat] = st.multiselect(f"{cat}", opts, key=f"bd_{de}_{cat}",
+                                         help="Leave empty to include every option of this category.")
+        flt = bd.clean_filters(chosen)
+        matched = bd.matching_cocs(info, flt)
+        label = bd.series_label(info, flt)
+        show = st.checkbox("Show on the dashboard (untick to use only inside calculated fields)", value=True, key="bd_show")
+        if not flt:
+            st.caption("Choose at least one option to make a slice, e.g. Female and 15+. "
+                       "Or add one row for every combination below.")
+        else:
+            st.caption(f"New row: **{bd.series_name(de, label)}** — adds up {len(matched)} combination(s): "
+                       + ", ".join(matched[:6]) + (" …" if len(matched) > 6 else ""))
+        b1, b2 = st.columns(2)
+        if b1.button("➕ Add this breakdown", type="primary", key="bd_add", disabled=not (flt and matched)):
+            try:
+                gsheets.save_breakdowns([{"name": bd.series_name(de, label), "data_element": de,
+                                          "filters": _json.dumps(flt), "visible": "yes" if show else "no"}],
+                                        st.session_state["user"]["display_name"])
+                st.session_state["bd_msg"] = ("success", f"Added \"{bd.series_name(de, label)}\". Pull again to see it.")
+                st.rerun()
+            except RuntimeError as e:
+                st.error(f"Couldn't save: {e}")
+        combos = bd.every_combination(info)
+        if b2.button(f"➕ One row for every combination ({len(combos)})", key="bd_all"):
+            if len(combos) > 60:
+                st.error("More than 60 combinations - pick options above instead.")
+            else:
+                try:
+                    gsheets.save_breakdowns(
+                        [{"name": bd.series_name(de, lab), "data_element": de, "filters": _json.dumps(f),
+                          "visible": "yes" if show else "no"} for lab, f in combos],
+                        st.session_state["user"]["display_name"])
+                    st.session_state["bd_msg"] = ("success", f"Added {len(combos)} breakdown rows for {de}. Pull again to see them.")
+                    st.rerun()
+                except RuntimeError as e:
+                    st.error(f"Couldn't save: {e}")
 
 
 def render_calc_builder(extra_names, preview_df, inline=False):
@@ -321,7 +407,10 @@ else:
                         st.session_state.pop("dhis2_all_elements", None)
                         st.session_state.pop("dhis2_all_elements_err", None)
                         st.rerun()
-                render_calc_builder(extra_names=set(all_el["name"]) | set(selected_de_names),
+                _bd_name_to_id = dict(zip(all_el["name"], all_el["id"]))
+                _bd_name_to_id.update(dict(zip(de_df["name"], de_df["id"])))
+                render_breakdown_builder(client, list(dict.fromkeys(selected_de_names)), _bd_name_to_id)
+                render_calc_builder(extra_names=set(all_el["name"]) | set(selected_de_names) | set(bd_saved["name"]),
                                      preview_df=st.session_state.get("live_df"), inline=True)
                 calc_builder_rendered = True
 
@@ -329,11 +418,15 @@ else:
                 name_to_id = dict(zip(all_el["name"], all_el["id"]))
                 name_to_id.update(dict(zip(de_df["name"], de_df["id"])))
                 id_to_name = {v: k for k, v in name_to_id.items()}
-                calc_input_ids, calc_unresolved = [], set()
+                calc_input_ids, calc_unresolved, calc_series_refs = [], set(), set()
+                _series_names = set(bd_saved["name"])
+                _series_de = dict(zip(bd_saved["name"], bd_saved["data_element"]))
                 if calc_fields is not None and not calc_fields.empty:
                     for _, _cf in calc_fields.iterrows():
                         for _nm in formulas.extract_referenced_elements(_cf["formula"]):
-                            if _nm in name_to_id:
+                            if _nm in _series_names:
+                                calc_series_refs.add(_nm)          # pulled by the breakdown step below
+                            elif _nm in name_to_id:
                                 calc_input_ids.append(name_to_id[_nm])
                             else:
                                 calc_unresolved.add(_nm)
@@ -429,6 +522,24 @@ else:
                                   "DHIS2 login has access to it, and confirm analytics tables have been "
                                   "generated for this period on your DHIS2 instance.")
                         st.stop()
+                    # --- breakdown series (sex / age / other categories) ---------------------------------
+                    _active = bd.active_series(bd_saved, selected_de_names, calc_series_refs)
+                    _hidden_series = bd.hidden_series(_active, selected_de_names, calc_series_refs)
+                    if not _active.empty:
+                        try:
+                            with st.spinner("Pulling the breakdowns..."):
+                                _infos = bd.fetch_info(client, [name_to_id[d] for d in _active["data_element"].unique()
+                                                                if d in name_to_id])
+                                _coc = bd.fetch_coc_analytics(client, [_infos[d]["id"] for d in _active["data_element"].unique()
+                                                                       if d in _infos], ";".join(ou_ids), ";".join(period_codes))
+                            _sr = bd.compute_series(_coc, _active, _infos)
+                            if not _sr.empty:
+                                raw = pd.concat([raw, _sr], ignore_index=True)
+                            _missing_s = sorted(set(_active["name"]) - set(_sr["data_element"]))
+                            if _missing_s:
+                                st.warning("No data came back for these breakdowns: " + ", ".join(f"`{m}`" for m in _missing_s))
+                        except (RuntimeError, KeyError) as e:
+                            st.error(f"Couldn't pull the breakdowns: {e}")
                     df_pulled = raw.rename(columns={"value": "actual"})
                     if len(period_codes) > 1:
                         # One row per facility × data element across the selected periods.
@@ -439,7 +550,8 @@ else:
                     df_pulled["achievement_pct"] = pd.NA
                     st.session_state["live_df"] = df_pulled
                     st.session_state["period"] = period_text
-                    st.session_state["helper_elements"] = [id_to_name[i] for i in helper_ids if i in id_to_name]
+                    st.session_state["helper_elements"] = ([id_to_name[i] for i in helper_ids if i in id_to_name]
+                                                           + list(_hidden_series))
                     st.info("Data pulled. Scroll down to \"🎯 Apply your own targets\" to add targets and see "
                               "achievement %.")
 

@@ -57,6 +57,8 @@ SHEET_COLUMNS = {
                           "achievement_pct", "published_by", "published_at"],
     "Targets": ["facility", "data_element", "target", "updated_by", "updated_at"],
     "CalculatedFields": ["name", "formula", "created_by", "created_at"],
+    # sex / age / other breakdowns of a data element (see breakdowns.py)
+    "Breakdowns": ["name", "data_element", "filters", "visible", "created_by", "created_at"],
     "KoboDeleted": ["sheet", "kobo_id", "deleted_by", "deleted_at"],
     # Competency assessments: one row per item scored, per assessment (see competency.py)
     "Competency": ["assessment_id", "visit_ref", "facility", "mentee_name", "cadre", "service_area",
@@ -389,6 +391,39 @@ def save_calculated_field(name: str, formula: str, created_by: str):
     ws = _get_or_create_ws("CalculatedFields")
     _wrap_gspread_errors(ws.clear)()
     _wrap_gspread_errors(ws.update)([cols] + combined.astype(str).values.tolist())
+    get_all.clear()
+
+
+def get_breakdowns() -> pd.DataFrame:
+    df = get_all("Breakdowns")
+    return df.drop(columns=["_row"], errors="ignore") if not df.empty else df
+
+
+def save_breakdowns(rows: list, created_by: str):
+    """Upsert breakdown series by name. rows: [{name, data_element, filters (json text), visible}]."""
+    cols = SHEET_COLUMNS["Breakdowns"]
+    existing = get_breakdowns()
+    new = pd.DataFrame(rows)
+    new["created_by"] = created_by
+    new["created_at"] = datetime.now().isoformat(timespec="seconds")
+    combined = new if existing.empty else (
+        pd.concat([existing, new], ignore_index=True).drop_duplicates(subset=["name"], keep="last"))
+    combined = combined.reindex(columns=cols).fillna("")
+    ws = _get_or_create_ws("Breakdowns")
+    _wrap_gspread_errors(ws.clear)()
+    _wrap_gspread_errors(ws.update)(range_name="A1", values=[cols] + combined.astype(str).values.tolist())
+    get_all.clear()
+
+
+def delete_breakdowns(names: list):
+    existing = get_breakdowns()
+    if existing.empty:
+        return
+    cols = SHEET_COLUMNS["Breakdowns"]
+    remaining = existing[~existing["name"].isin(names)].reindex(columns=cols).fillna("")
+    ws = _get_or_create_ws("Breakdowns")
+    _wrap_gspread_errors(ws.clear)()
+    _wrap_gspread_errors(ws.update)(range_name="A1", values=[cols] + remaining.astype(str).values.tolist())
     get_all.clear()
 
 
