@@ -174,24 +174,30 @@ def render_breakdown_builder(client, element_names, name_to_id):
         chosen = {}
         for cat, opts in info["categories"].items():
             chosen[cat] = st.multiselect(f"{cat}", opts, key=f"bd_{de}_{cat}",
-                                         help="Leave empty to include every option of this category.")
+                                         help="Pick one or several options - several are added together into one row. "
+                                              "Leave empty to include every option of this category.")
         flt = bd.clean_filters(chosen)
-        matched = bd.matching_cocs(info, flt)
-        label = bd.series_label(info, flt)
+        cats = list(info["categories"])
+        split_cat = st.selectbox("Rows to make", ["One row - add the chosen options together"] + [f"A separate row for each {c} option" for c in cats],
+                                 key=f"bd_split_{de}",
+                                 help="For example choose 15+ under Age and 'a separate row for each Sex option' to get "
+                                      "one row for males and one for females.")
+        split = None if split_cat.startswith("One row") else cats[[f"A separate row for each {c} option" for c in cats].index(split_cat)]
+        groups = bd.split_groups(info, flt, split)
         show = st.checkbox("Show on the dashboard (untick to use only inside calculated fields)", value=True, key="bd_show")
-        if not flt:
+        if not groups:
             st.caption("Choose at least one option to make a slice, e.g. Female and 15+. "
                        "Or add one row for every combination below.")
         else:
-            st.caption(f"New row: **{bd.series_name(de, label)}** — adds up {len(matched)} combination(s): "
-                       + ", ".join(matched[:6]) + (" …" if len(matched) > 6 else ""))
+            st.caption("Rows to be added: " + "; ".join(f"**{bd.series_name(de, lab)}**" for lab, _ in groups[:6])
+                       + (f" … ({len(groups)} rows)" if len(groups) > 6 else ""))
         b1, b2 = st.columns(2)
-        if b1.button("➕ Add this breakdown", type="primary", key="bd_add", disabled=not (flt and matched)):
+        if b1.button("➕ Add this breakdown", type="primary", key="bd_add", disabled=not groups):
             try:
-                gsheets.save_breakdowns([{"name": bd.series_name(de, label), "data_element": de,
-                                          "filters": _json.dumps(flt), "visible": "yes" if show else "no"}],
+                gsheets.save_breakdowns([{"name": bd.series_name(de, lab), "data_element": de, "filters": _json.dumps(g),
+                                          "visible": "yes" if show else "no"} for lab, g in groups],
                                         st.session_state["user"]["display_name"])
-                st.session_state["bd_msg"] = ("success", f"Added \"{bd.series_name(de, label)}\". Pull again to see it.")
+                st.session_state["bd_msg"] = ("success", f"Added {len(groups)} breakdown row(s). Pull again to see them.")
                 st.rerun()
             except RuntimeError as e:
                 st.error(f"Couldn't save: {e}")
@@ -209,6 +215,41 @@ def render_breakdown_builder(client, element_names, name_to_id):
                     st.rerun()
                 except RuntimeError as e:
                     st.error(f"Couldn't save: {e}")
+
+        # --- apply the same choice to a calculated field ---------------------------------------------
+        if calc_fields is not None and not calc_fields.empty:
+            st.markdown("**Apply this breakdown to a calculated field**")
+            st.caption("Uses the options chosen above. Every data element in the formula is switched to the same slice, "
+                       "so a coverage or positivity formula is calculated for each age group, sex and so on. "
+                       "Elements without that breakdown stay as totals.")
+            cf_name = st.selectbox("Calculated field", calc_fields["name"].tolist(),
+                                   index=None, key="bd_calc_pick", placeholder="Choose a calculated field…")
+            if cf_name:
+                cf_formula = calc_fields.loc[calc_fields["name"] == cf_name, "formula"].iloc[0]
+                st.caption(f"Formula: `{cf_formula}`")
+                if st.button("🧮 Create the calculated field(s) for this breakdown", key="bd_calc_go",
+                             disabled=not groups):
+                    try:
+                        _els = [e for e in formulas.extract_referenced_elements(cf_formula) if bd.SEP not in e]
+                        _need = [name_to_id[e] for e in _els if e in name_to_id and e not in cache]
+                        if _need:
+                            with st.spinner("Reading the breakdowns of the formula's data elements..."):
+                                cache.update(bd.fetch_info(client, _need))
+                        _res = bd.apply_to_formula(cf_formula, groups, {e: cache.get(e) for e in _els})
+                        _series = {s["name"]: s for r in _res for s in r["series"]}
+                        if _series:
+                            gsheets.save_breakdowns(list(_series.values()), st.session_state["user"]["display_name"])
+                        for r in _res:
+                            gsheets.save_calculated_field(f"{cf_name}{bd.SEP}{r['label']}", r["formula"],
+                                                          st.session_state["user"]["display_name"])
+                        _notes = sorted({n for r in _res for n in r["notes"]})
+                        st.session_state["bd_msg"] = ("success", f"Created {len(_res)} calculated field(s): "
+                                                      + ", ".join(f"{cf_name}{bd.SEP}{r['label']}" for r in _res[:4])
+                                                      + (" …" if len(_res) > 4 else "") + ". Pull again to calculate them."
+                                                      + ("  Note: " + "; ".join(_notes) if _notes else ""))
+                        st.rerun()
+                    except (RuntimeError, KeyError) as e:
+                        st.error(f"Couldn't create them: {e}")
 
 
 def render_calc_builder(extra_names, preview_df, inline=False):
@@ -509,6 +550,12 @@ else:
                 if calc_unresolved:
                     st.warning("These calculated-field inputs weren't found in DHIS2, so those fields can't be "
                                 "calculated: " + ", ".join(f"`{n}`" for n in sorted(calc_unresolved)))
+                include_bd = True
+                if not bd_saved.empty:
+                    include_bd = st.checkbox("Include my saved breakdowns (sex, age, other) in this pull", value=True,
+                                             key="bd_include",
+                                             help="Untick to pull only the totals of the selected data elements. "
+                                                  "Calculated fields built on breakdowns can't be calculated without them.")
                 pull_clicked = st.button("Pull from DHIS2", type="primary")
                 if pull_clicked and not (pull_ids and ou_ids and period_codes):
                     st.warning("Pick at least one data element, one org unit and one reporting period first.")
@@ -523,7 +570,8 @@ else:
                                   "generated for this period on your DHIS2 instance.")
                         st.stop()
                     # --- breakdown series (sex / age / other categories) ---------------------------------
-                    _active = bd.active_series(bd_saved, selected_de_names, calc_series_refs)
+                    _active = (bd.active_series(bd_saved, selected_de_names, calc_series_refs) if include_bd
+                               else bd.normalize_series(pd.DataFrame()))
                     _hidden_series = bd.hidden_series(_active, selected_de_names, calc_series_refs)
                     if not _active.empty:
                         try:

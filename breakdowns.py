@@ -196,3 +196,55 @@ def fetch_coc_analytics(client, data_element_ids: list, org_units: str, periods:
     df = df.rename(columns={"dx": "data_element", "co": "coc", "ou": "facility", "pe": "period"})
     df["value"] = pd.to_numeric(df["value"], errors="coerce")
     return df[["facility", "data_element", "coc", "period", "value"]]
+
+
+# ---------------------------------------------------------------------
+# Separate rows per option, and applying a breakdown to a calculated field
+# ---------------------------------------------------------------------
+def split_groups(info: dict, filters: dict, split_category: str | None) -> list:
+    """[(label, filters)] to create. Without a split: one group made of everything chosen (several options of
+    a category are added together). With a split category: one group per option of that category (the options
+    chosen there, or all of them), keeping the other choices fixed."""
+    f = clean_filters(filters)
+    if not split_category:
+        return [(series_label(info, f), f)] if f else []
+    opts = f.get(split_category) or info.get("categories", {}).get(split_category, [])
+    out = []
+    for o in opts:
+        g = {**f, split_category: [o]}
+        out.append((series_label(info, g), g))
+    return out
+
+
+def apply_to_formula(formula: str, groups: list, infos: dict) -> list:
+    """Re-write a calculated field's formula once per group: every [element] becomes [element | slice].
+    Elements that have none of the chosen categories keep their total. Returns
+    [{"label", "formula", "series": [definitions], "notes": [..]}]."""
+    import re
+    from formulas import extract_referenced_elements
+    results = []
+    names = extract_referenced_elements(formula)
+    for label, flt in groups:
+        new, series, notes = formula, {}, []
+        for el in names:
+            info = infos.get(el)
+            if SEP in el or not info or not has_breakdowns(info):
+                notes.append(f"{el}: kept as total (no breakdown)")
+                continue
+            f_e, dropped = {}, []
+            for cat, opts in flt.items():
+                valid = [o for o in opts if o in info["categories"].get(cat, [])]
+                if valid:
+                    f_e[cat] = valid
+                else:
+                    dropped.append(cat)
+            if not f_e:
+                notes.append(f"{el}: kept as total (it has no {', '.join(flt)})")
+                continue
+            if dropped:
+                notes.append(f"{el}: no {', '.join(dropped)} category, used only {series_label(info, f_e)}")
+            sname = series_name(el, series_label(info, f_e))
+            series[sname] = {"name": sname, "data_element": el, "filters": json.dumps(f_e), "visible": "no"}
+            new = re.sub(r"\[\s*" + re.escape(el) + r"\s*\]", lambda m: f"[{sname}]", new)
+        results.append({"label": label, "formula": new, "series": list(series.values()), "notes": notes})
+    return results
