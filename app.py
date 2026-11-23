@@ -63,7 +63,7 @@ facility_page = st.Page("pages/1_facility_dashboard.py", title="Facility Dashboa
 activities_page = st.Page("pages/5_activities_dashboard.py", title="Activities Dashboard", icon="📊")
 
 if role == "viewer":
-    pages = [facility_page, activities_page]
+    pages = [facility_page, activities_page, reports_page]
 else:
     home_page = st.Page("pages/0_home.py", title="Home", icon="🏠")
     dqa_page = st.Page("pages/2_dqa_form.py", title="DQA Form", icon="📋")
@@ -72,7 +72,8 @@ else:
     competency_page = st.Page("pages/6_competency.py", title="Competency Assessment", icon="🎯")
     account_page = st.Page("pages/8_account.py", title="My account", icon="👤")
     visit_tools_page = st.Page("pages/9_visit_tools.py", title="Visit tools", icon="🧭")
-    pages = [home_page, facility_page, dqa_page, ssm_page, lv_page, competency_page, activities_page, account_page, visit_tools_page]
+    reports_page = st.Page("pages/10_reports.py", title="Reports", icon="📄")
+    pages = [home_page, facility_page, dqa_page, ssm_page, lv_page, competency_page, activities_page, account_page, visit_tools_page, reports_page]
 
 nav = st.navigation(pages)
 nav.run()
