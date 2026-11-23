@@ -442,9 +442,12 @@ def _add_table(doc, df: pd.DataFrame, max_rows: int = 60):
 
 def _chart_png(rep: dict):
     """Competency vs systems % by topic, as a PNG for the Word report (None if there's nothing to plot)."""
-    import matplotlib
-    matplotlib.use("Agg")
-    import matplotlib.pyplot as plt
+    try:
+        import matplotlib
+        matplotlib.use("Agg")
+        import matplotlib.pyplot as plt
+    except ImportError:                      # chart is optional: the report still works without it
+        return None
     comp_df, ses = rep["competency"], rep["session"]
     topics = list(dict.fromkeys(list(comp_df["Topic"]) + list(ses["Topic"])))
     if not topics:
