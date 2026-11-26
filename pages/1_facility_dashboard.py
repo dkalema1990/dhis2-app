@@ -650,13 +650,21 @@ if role != "viewer" and calc_fields is not None and not calc_fields.empty and no
 # working on the analysis. Independent of mock vs. live DHIS2 and of
 # re-pulling.
 # ---------------------------------------------------------------------
+ALL_FAC = "*"          # a Targets row with facility "*" is the default for every facility without its own target
 manual_targets = gsheets.get_targets() if (role != "viewer" and gsheets.is_configured()) else None
 if manual_targets is not None and not manual_targets.empty:
+    _specific = manual_targets[manual_targets["facility"].astype(str) != ALL_FAC]
+    _default = (manual_targets[manual_targets["facility"].astype(str) == ALL_FAC]
+                .drop_duplicates("data_element", keep="last").set_index("data_element")["target"])
     df = df.drop(columns=["target", "achievement_pct"], errors="ignore").merge(
-        manual_targets[["facility", "data_element", "target"]], on=["facility", "data_element"], how="left"
+        _specific[["facility", "data_element", "target"]], on=["facility", "data_element"], how="left"
     )
     df["target"] = pd.to_numeric(df["target"], errors="coerce")
+    df["target_is_default"] = df["target"].isna() & df["data_element"].isin(_default.index)
+    df["target"] = df["target"].fillna(df["data_element"].map(_default))
     df["achievement_pct"] = (df["actual"] / df["target"] * 100).round(1)
+else:
+    _default = pd.Series(dtype=float)
 
 # ---------------------------------------------------------------------
 # Filters
@@ -685,14 +693,42 @@ with st.expander("🎯 Targets — download a template, fill it in, then apply i
         "**Step 1.** Download a template listing every facility × data element combo below "
         "(respects the filters above) — already-applied targets are pre-filled, so you only "
         "need to fill in rows for anything new. **Step 2.** Fill in the `target` column in "
-        "Excel/Sheets, at your own pace. **Step 3.** Upload it below and click Apply — "
+        "Excel/Sheets, at your own pace (leave a row blank to use the all-facilities target). **Step 3.** Upload it below and click Apply — "
         "achievement % updates immediately."
     )
+    st.markdown("##### Same target for every facility")
+    st.caption("Set a target once per indicator (including calculated ones). It applies to every facility - "
+               "including any you add later - unless a facility has its own target in the template below, "
+               "which always wins.")
+    _els = sorted(df["data_element"].unique())
+    _hid = set(st.session_state.get("helper_elements", []))
+    _els = [e for e in _els if e not in _hid]
+    _def_df = pd.DataFrame({"data_element": _els,
+                            "target": [float(_default.get(e)) if e in _default.index and pd.notna(_default.get(e)) else None for e in _els]})
+    _edited = st.data_editor(_def_df, hide_index=True, use_container_width=True, key="default_targets_editor",
+                             disabled=["data_element"] if can_act else True,
+                             column_config={"data_element": "Indicator", "target": st.column_config.NumberColumn("Target (all facilities)")})
+    if st.button("💾 Save targets for all facilities", disabled=not can_act, key="save_default_targets"):
+        _rows = _edited.dropna(subset=["target"])
+        if _rows.empty:
+            st.warning("Enter at least one target first.")
+        else:
+            try:
+                gsheets.save_targets(pd.DataFrame({"facility": ALL_FAC, "data_element": _rows["data_element"], "target": _rows["target"]}),
+                                     st.session_state["user"]["display_name"])
+                st.success(f"Saved {len(_rows)} target(s) for all facilities.")
+                st.rerun()
+            except RuntimeError as e:
+                st.error(f"Couldn't save targets: {e}")
+    st.markdown("##### Different target for one facility")
     # Pre-fill from whatever target values are already part of the analysis
     # currently on screen — this works the same whether that's your own
     # applied targets (admin/submitter) or a published analysis (viewer),
     # since `view` already carries the merged target column either way.
-    template_df = (view[["facility", "data_element", "target"]]
+    _tv = view.copy()
+    if "target_is_default" in _tv.columns:                 # defaults aren't copied into the template
+        _tv.loc[_tv["target_is_default"].fillna(False).astype(bool), "target"] = pd.NA
+    template_df = (_tv[["facility", "data_element", "target"]]
                     .drop_duplicates()
                     .sort_values(["facility", "data_element"])
                     .reset_index(drop=True))
@@ -752,7 +788,7 @@ with st.expander("🎯 Targets — download a template, fill it in, then apply i
         except RuntimeError as e:
             st.error(f"Couldn't clear targets: {e}")
     if manual_targets is not None and not manual_targets.empty:
-        st.caption(f"Currently saved: targets set for {len(manual_targets)} facility × data element "
+        st.caption(f"Currently saved: {len(manual_targets)} target row(s) (a facility of * means all facilities) "
                     f"row(s) — persisted in Google Sheets, not just this session.")
 
 # --- Publish: share this analysis with everyone, including viewers -----
