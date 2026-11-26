@@ -513,35 +513,41 @@ else:
                     period_text = f"{period_codes[0]} … {period_codes[-1]} ({len(period_codes)} periods, {combine_mode.lower()})"
 
                 # --- 4) Org unit dropdown, multi-select ------------------------
-                ou_level = st.number_input("Org unit level (1=country, 4=typical facility level)",
-                                             min_value=1, max_value=8, value=4, step=1)
-                ou_cache_key = f"dhis2_orgunits_{ou_level}"
+                ou_levels = st.multiselect("Org unit levels (1=country; facilities are often level 4, 5, 6 or 7 - pick all that apply)",
+                                           list(range(1, 9)), default=[4], key="ou_levels")
+                ou_levels = sorted(ou_levels)
+                ou_cache_keys = {lv: f"dhis2_orgunits_{lv}" for lv in ou_levels}
                 try:
                     _saved_fac = gsheets.get_my_facilities() if gsheets.is_configured() else pd.DataFrame()
                 except RuntimeError:
                     _saved_fac = pd.DataFrame()
-                _from_dhis2 = ou_cache_key in st.session_state
+                _missing_lv = [lv for lv, k in ou_cache_keys.items() if k not in st.session_state]
+                _from_dhis2 = bool(ou_levels) and not _missing_lv
                 _use_saved = (not _from_dhis2) and not _saved_fac.empty
                 if _use_saved:
                     ou_df = pd.DataFrame({"id": _saved_fac["org_unit_id"].astype(str), "name": _saved_fac["name"].astype(str),
-                                          "parent": [({"name": p} if str(p).strip() else None) for p in _saved_fac["parent"]]})
+                                          "parent": [({"name": p} if str(p).strip() else None) for p in _saved_fac["parent"]],
+                                          "level": _saved_fac["level"].astype(str)})
                     st.caption(f"📌 Using your saved list of {len(ou_df)} facilities - no DHIS2 call needed. "
                                "Load from DHIS2 below only to add or change facilities.")
                 elif _from_dhis2:
-                    ou_df = st.session_state[ou_cache_key]
+                    ou_df = pd.concat([st.session_state[ou_cache_keys[lv]].assign(level=str(lv)) for lv in ou_levels], ignore_index=True).drop_duplicates("id")
                 else:
                     ou_df = None
-                if not _from_dhis2:
-                    if st.button("🔄 Load org units at this level from DHIS2" if _use_saved else "🔄 Load org units at this level"):
+                if not ou_levels:
+                    st.caption("Pick at least one org unit level.")
+                elif not _from_dhis2:
+                    if st.button("🔄 Load org units at these levels from DHIS2" if _use_saved else "🔄 Load org units at these levels"):
                         try:
                             with st.spinner("Fetching org units..."):
-                                st.session_state[ou_cache_key] = client.get_org_units(level=int(ou_level))
+                                for lv in _missing_lv:
+                                    st.session_state[ou_cache_keys[lv]] = client.get_org_units(level=int(lv))
                             st.rerun()
                         except RuntimeError as e:
                             st.error(f"Couldn't load org units: {e}")
                 if ou_df is not None:
                     if ou_df.empty:
-                        st.warning("No org units returned at this level — check the level number and your "
+                        st.warning("No org units returned at these levels — check the level numbers and your "
                                     "DHIS2 permissions.")
                         ou_ids = []
                     else:
@@ -552,7 +558,7 @@ else:
                         ou_display_sel = st.multiselect(
                             "Org units (select one or more)", ou_df["display"].tolist(),
                             default=ou_df["display"].tolist() if _use_saved else ou_df["display"].tolist()[:10],
-                            key=f"ou_sel_{'saved' if _use_saved else ou_level}"
+                            key=f"ou_sel_{'saved' if _use_saved else '-'.join(map(str, ou_levels))}"
                         )
                         ou_ids = ou_df[ou_df["display"].isin(ou_display_sel)]["id"].tolist()
                         sv1, sv2 = st.columns(2)
@@ -563,7 +569,7 @@ else:
                                 gsheets.save_my_facilities(pd.DataFrame({
                                     "org_unit_id": _pick["id"], "name": _pick["name"],
                                     "parent": [p["name"] if isinstance(p, dict) else "" for p in _pick["parent"]],
-                                    "level": int(ou_level)}), st.session_state["user"]["display_name"])
+                                    "level": _pick["level"]}), st.session_state["user"]["display_name"])
                                 st.success(f"Saved {len(_pick)} facilities. They will load from your list from now on.")
                             except RuntimeError as e:
                                 st.error(f"Couldn't save the list: {e}")
@@ -576,7 +582,7 @@ else:
                                 st.error(f"Couldn't clear the list: {e}")
                 else:
                     ou_ids = []
-                    st.caption("Click \"Load org units at this level\" above to pick facilities.")
+                    st.caption("Pick the levels above, then click \"Load org units at these levels\" to choose facilities.")
 
                 if helper_ids:
                     st.caption(f"➕ {len(helper_ids)} extra data element(s) will also be pulled because your "
