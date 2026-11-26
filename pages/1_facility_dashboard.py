@@ -516,16 +516,30 @@ else:
                 ou_level = st.number_input("Org unit level (1=country, 4=typical facility level)",
                                              min_value=1, max_value=8, value=4, step=1)
                 ou_cache_key = f"dhis2_orgunits_{ou_level}"
-                if ou_cache_key not in st.session_state:
-                    if st.button("🔄 Load org units at this level"):
+                try:
+                    _saved_fac = gsheets.get_my_facilities() if gsheets.is_configured() else pd.DataFrame()
+                except RuntimeError:
+                    _saved_fac = pd.DataFrame()
+                _from_dhis2 = ou_cache_key in st.session_state
+                _use_saved = (not _from_dhis2) and not _saved_fac.empty
+                if _use_saved:
+                    ou_df = pd.DataFrame({"id": _saved_fac["org_unit_id"].astype(str), "name": _saved_fac["name"].astype(str),
+                                          "parent": [({"name": p} if str(p).strip() else None) for p in _saved_fac["parent"]]})
+                    st.caption(f"📌 Using your saved list of {len(ou_df)} facilities - no DHIS2 call needed. "
+                               "Load from DHIS2 below only to add or change facilities.")
+                elif _from_dhis2:
+                    ou_df = st.session_state[ou_cache_key]
+                else:
+                    ou_df = None
+                if not _from_dhis2:
+                    if st.button("🔄 Load org units at this level from DHIS2" if _use_saved else "🔄 Load org units at this level"):
                         try:
                             with st.spinner("Fetching org units..."):
                                 st.session_state[ou_cache_key] = client.get_org_units(level=int(ou_level))
                             st.rerun()
                         except RuntimeError as e:
                             st.error(f"Couldn't load org units: {e}")
-                if ou_cache_key in st.session_state:
-                    ou_df = st.session_state[ou_cache_key]
+                if ou_df is not None:
                     if ou_df.empty:
                         st.warning("No org units returned at this level — check the level number and your "
                                     "DHIS2 permissions.")
@@ -537,9 +551,29 @@ else:
                             else r["name"], axis=1)
                         ou_display_sel = st.multiselect(
                             "Org units (select one or more)", ou_df["display"].tolist(),
-                            default=ou_df["display"].tolist()[:10]
+                            default=ou_df["display"].tolist() if _use_saved else ou_df["display"].tolist()[:10],
+                            key=f"ou_sel_{'saved' if _use_saved else ou_level}"
                         )
                         ou_ids = ou_df[ou_df["display"].isin(ou_display_sel)]["id"].tolist()
+                        sv1, sv2 = st.columns(2)
+                        if sv1.button("💾 Save the selected facilities as my list", disabled=not (can_act and ou_ids),
+                                      key="save_my_fac", help="Next time the list loads from here instead of DHIS2."):
+                            _pick = ou_df[ou_df["id"].isin(ou_ids)]
+                            try:
+                                gsheets.save_my_facilities(pd.DataFrame({
+                                    "org_unit_id": _pick["id"], "name": _pick["name"],
+                                    "parent": [p["name"] if isinstance(p, dict) else "" for p in _pick["parent"]],
+                                    "level": int(ou_level)}), st.session_state["user"]["display_name"])
+                                st.success(f"Saved {len(_pick)} facilities. They will load from your list from now on.")
+                            except RuntimeError as e:
+                                st.error(f"Couldn't save the list: {e}")
+                        if _use_saved and sv2.button("🗑️ Forget my saved list", disabled=not can_act, key="forget_my_fac"):
+                            try:
+                                gsheets.save_my_facilities(pd.DataFrame(columns=["org_unit_id", "name", "parent", "level"]),
+                                                           st.session_state["user"]["display_name"])
+                                st.rerun()
+                            except RuntimeError as e:
+                                st.error(f"Couldn't clear the list: {e}")
                 else:
                     ou_ids = []
                     st.caption("Click \"Load org units at this level\" above to pick facilities.")

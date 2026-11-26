@@ -98,6 +98,8 @@ SHEET_COLUMNS = {
     "ActionStatus": ["action_key", "visit_ref", "facility", "action", "status", "comment", "updated_by", "updated_at"],
     # facility list for the Kobo visit form's dropdown, pulled from DHIS2 org units
     "Facilities": ["org_unit_id", "name", "parent", "level", "updated_at"],
+    # the facilities picked on the dashboard and saved, so DHIS2 doesn't have to be asked for the list each time
+    "MyFacilities": ["org_unit_id", "name", "parent", "level", "saved_by", "saved_at"],
     "IPIIndicators": ["ipi_id", "indicator", "active"],
     "RoutineIndicators": ["indicator_id", "indicator", "active"],
 }
@@ -549,6 +551,24 @@ def save_facilities(df: pd.DataFrame):
     cols = SHEET_COLUMNS["Facilities"]
     out = df.reindex(columns=cols).fillna("").astype(str)
     ws = _get_or_create_ws("Facilities")
+    _wrap_gspread_errors(ws.clear)()
+    _wrap_gspread_errors(ws.update)(range_name="A1", values=[cols] + out.values.tolist())
+    get_all.clear()
+
+
+def get_my_facilities() -> pd.DataFrame:
+    df = get_all("MyFacilities")
+    return df.drop(columns=["_row"], errors="ignore") if not df.empty else df
+
+
+def save_my_facilities(df: pd.DataFrame, saved_by: str):
+    """Replace the saved dashboard facility list (org_unit_id, name, parent, level)."""
+    cols = SHEET_COLUMNS["MyFacilities"]
+    out = df.copy()
+    out["saved_by"] = saved_by
+    out["saved_at"] = datetime.now().isoformat(timespec="seconds")
+    out = out.reindex(columns=cols).fillna("").astype(str)
+    ws = _get_or_create_ws("MyFacilities")
     _wrap_gspread_errors(ws.clear)()
     _wrap_gspread_errors(ws.update)(range_name="A1", values=[cols] + out.values.tolist())
     get_all.clear()
