@@ -665,6 +665,7 @@ if manual_targets is not None and not manual_targets.empty:
     df["achievement_pct"] = (df["actual"] / df["target"] * 100).round(1)
 else:
     _default = pd.Series(dtype=float)
+    _specific = pd.DataFrame(columns=["facility", "data_element", "target"])
 
 # ---------------------------------------------------------------------
 # Filters
@@ -720,7 +721,68 @@ with st.expander("🎯 Targets — download a template, fill it in, then apply i
                 st.rerun()
             except RuntimeError as e:
                 st.error(f"Couldn't save targets: {e}")
-    st.markdown("##### Different target for one facility")
+    st.markdown("##### Different target for some facilities")
+    st.caption("Pick **by indicator** (see every facility for one indicator) or **by facility** (see every indicator for one "
+               "facility). *Own target* is saved only when it differs from the all-facilities target; tick "
+               "**Use common target** (or clear the cell) to go back to it.")
+    _fp_now = gsheets.targets_fingerprint(manual_targets) if manual_targets is not None else ""
+    _ver = st.session_state.get("tg_ver", 0)
+    _mode = st.radio("View", ["By indicator", "By facility"], horizontal=True, key="tg_mode")
+    _facs_all = sorted(view["facility"].unique())
+    _els_all = [e for e in sorted(view["data_element"].unique()) if e not in _hid]
+    _own = {(str(f), str(e)): t for f, e, t in zip(_specific["facility"], _specific["data_element"], _specific["target"]) if pd.notna(t)}
+    _com = {e: float(_default[e]) for e in _default.index if pd.notna(_default[e])}
+    if _mode == "By indicator" and _els_all:
+        _pick = st.selectbox("Indicator", _els_all, key="tg_pick_el")
+        _grid = pd.DataFrame({"Facility": _facs_all}); _grid["_f"] = _grid["Facility"]; _grid["_e"] = _pick
+    elif _mode == "By facility" and _facs_all:
+        _pick = st.selectbox("Facility", _facs_all, key="tg_pick_fac")
+        _grid = pd.DataFrame({"Indicator": _els_all}); _grid["_e"] = _grid["Indicator"]; _grid["_f"] = _pick
+    else:
+        _grid = None
+    if _grid is not None and not _grid.empty:
+        _fpk = f"tg_fp_{_mode}_{_pick}_{_ver}"
+        if _fpk not in st.session_state:                      # remembered from when this table was first shown
+            st.session_state[_fpk] = _fp_now
+        _grid["Common target"] = [_com.get(e) for e in _grid["_e"]]
+        _grid["Own target"] = [_own.get((f, e)) for f, e in zip(_grid["_f"], _grid["_e"])]
+        _grid["Use common target"] = _grid["Own target"].isna()
+        _lab = "Facility" if _mode == "By indicator" else "Indicator"
+        _show_cols = [_lab, "Common target", "Own target", "Use common target"]
+        _ed = st.data_editor(_grid[_show_cols], hide_index=True, use_container_width=True,
+                             key=f"tg_grid_{_mode}_{_pick}_{_ver}",
+                             disabled=[_lab, "Common target"] if can_act else True,
+                             column_config={"Common target": st.column_config.NumberColumn(format="%g"),
+                                            "Own target": st.column_config.NumberColumn(format="%g"),
+                                            "Use common target": st.column_config.CheckboxColumn()})
+        if st.button("💾 Save these targets", disabled=not can_act, key="tg_grid_save"):
+            if gsheets.targets_fingerprint() != st.session_state[_fpk]:
+                st.warning("Someone saved targets while this table was open. Reload the page (press R) and redo your changes "
+                           "so nothing is overwritten.")
+            else:
+                _ups, _dels = [], []
+                for i, r in _ed.reset_index(drop=True).iterrows():
+                    f, e = _grid.at[i, "_f"], _grid.at[i, "_e"]
+                    own_new = r["Own target"]
+                    use_common = bool(r["Use common target"]) or pd.isna(own_new)
+                    c = _com.get(e)
+                    if use_common or (c is not None and float(own_new) == c):
+                        if (f, e) in _own:
+                            _dels.append((f, e))
+                    elif (f, e) not in _own or float(_own[(f, e)]) != float(own_new):
+                        _ups.append({"facility": f, "data_element": e, "target": float(own_new)})
+                if not _ups and not _dels:
+                    st.info("No changes to save.")
+                else:
+                    try:
+                        gsheets.apply_target_changes(pd.DataFrame(_ups, columns=["facility", "data_element", "target"]), _dels,
+                                                     st.session_state["user"]["display_name"])
+                        st.session_state["tg_ver"] = _ver + 1
+                        st.success(f"Saved {len(_ups)} own target(s); {len(_dels)} went back to the common target.")
+                        st.rerun()
+                    except RuntimeError as ex:
+                        st.error(f"Couldn't save targets: {ex}")
+    st.markdown("##### Or fill many at once with a template")
     # Pre-fill from whatever target values are already part of the analysis
     # currently on screen — this works the same whether that's your own
     # applied targets (admin/submitter) or a published analysis (viewer),

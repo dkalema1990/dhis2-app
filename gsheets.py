@@ -361,6 +361,36 @@ def get_targets() -> pd.DataFrame:
     return df
 
 
+def targets_fingerprint(df=None) -> str:
+    """Short hash of the saved targets, used to notice that someone else changed them while a grid was open."""
+    import hashlib
+    if df is None:
+        get_all.clear()
+        df = get_targets()
+    txt = "" if df is None or df.empty else df[["facility", "data_element", "target"]].astype(str).to_csv(index=False)
+    return hashlib.md5(txt.encode()).hexdigest()
+
+
+def apply_target_changes(upserts: pd.DataFrame, deletes: list, updated_by: str):
+    """One write: remove the (facility, data_element) pairs in `deletes`, then add/replace `upserts`
+    (columns facility, data_element, target)."""
+    cols = SHEET_COLUMNS["Targets"]
+    get_all.clear()
+    existing = get_all("Targets")
+    existing = existing.drop(columns=["_row"], errors="ignore") if not existing.empty else pd.DataFrame(columns=cols)
+    drop = set(map(tuple, deletes)) | set(zip(upserts["facility"], upserts["data_element"]))
+    if not existing.empty:
+        existing = existing[[ (f, e) not in drop for f, e in zip(existing["facility"].astype(str), existing["data_element"].astype(str)) ]]
+    new = upserts.copy()
+    new["updated_by"] = updated_by
+    new["updated_at"] = datetime.now().isoformat(timespec="seconds")
+    combined = pd.concat([existing, new], ignore_index=True).reindex(columns=cols).fillna("")
+    ws = _get_or_create_ws("Targets")
+    _wrap_gspread_errors(ws.clear)()
+    _wrap_gspread_errors(ws.update)([cols] + combined.astype(str).values.tolist())
+    get_all.clear()
+
+
 def clear_targets():
     """Wipe all persisted targets (header row kept) — affects everyone."""
     ws = _get_or_create_ws("Targets")
